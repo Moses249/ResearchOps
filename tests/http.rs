@@ -1,8 +1,8 @@
 use serde_json::{json, Value};
 use std::{
-    io::{Read, Write},
-    net::{TcpListener, TcpStream},
-    process::{Child, Command, Stdio},
+    io::{BufRead, BufReader, Read, Write},
+    net::TcpStream,
+    process::{Child, ChildStdout, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -10,6 +10,7 @@ use std::{
 struct Server {
     child: Child,
     port: u16,
+    _stdout: BufReader<ChildStdout>,
     _dir: tempfile::TempDir,
 }
 impl Drop for Server {
@@ -21,20 +22,30 @@ impl Drop for Server {
 impl Server {
     fn start() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let socket = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = socket.local_addr().unwrap().port();
-        drop(socket);
-        let child = Command::new(env!("CARGO_BIN_EXE_researchops"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_researchops"))
             .arg("--db")
             .arg(dir.path().join("http.db"))
-            .args(["serve", "--port", &port.to_string()])
-            .stdout(Stdio::null())
+            .args(["serve", "--port", "0"])
+            .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
+        // Let the child retain the OS-assigned port. Releasing a reservation
+        // before spawn lets parallel tests mistake another server for their own.
+        let mut startup = String::new();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        stdout.read_line(&mut startup).unwrap();
+        let port = startup
+            .trim()
+            .rsplit(':')
+            .next()
+            .expect("server startup address")
+            .parse()
+            .expect("server must announce its bound port");
         let mut server = Self {
             child,
             port,
+            _stdout: stdout,
             _dir: dir,
         };
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -135,4 +146,88 @@ fn api_connection_is_session_only_and_redacts_credentials() {
     assert_eq!(status, 400);
     let (_, cleared) = server.json("DELETE", "/api/connection", json!({}));
     assert_eq!(cleared["configured"], false);
+}
+
+#[test]
+fn shared_execution_api_reports_system_completion_separately_from_business_partial() {
+    let server = Server::start();
+    let (status, contracts) = server.json("GET", "/api/contracts", json!(null));
+    assert_eq!(status, 200);
+    assert!(!contracts.as_array().unwrap().is_empty());
+    // Exercise the completion boundary repeatedly while polling concurrently
+    // with the background worker. Inactive must never accompany a stale running
+    // snapshot from that same worker.
+    for _ in 0..8 {
+        let spec: Value = serde_json::from_str(include_str!("../examples/research.json")).unwrap();
+        let (_, created) = server.json("POST", "/api/runs", spec);
+        let id = created["id"].as_str().unwrap();
+        let (status, _) = server.json(
+            "POST",
+            &format!("/api/runs/{id}/execute"),
+            json!({"mode":"local","trigger":"scheduled"}),
+        );
+        assert_eq!(status, 202);
+        let mut finished = None;
+        for _ in 0..100 {
+            let (_, run) = server.json("GET", &format!("/api/runs/{id}"), json!(null));
+            if run["agent_active"] == false {
+                finished = Some(run);
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let run = finished.expect("background execution did not finish");
+        assert_eq!(run["execution"]["latest"]["system_status"], "completed");
+        assert_eq!(run["execution"]["business_status"], "PARTIAL");
+        assert_eq!(run["execution"]["latest"]["trigger"], "scheduled");
+        assert_eq!(run["execution"]["counts"]["readback_verified"], 3);
+        let (status, recovery) =
+            server.json("GET", &format!("/api/runs/{id}/recovery"), json!(null));
+        assert_eq!(status, 200);
+        assert!(recovery["execution"]["resume"]["sql"]
+            .as_str()
+            .unwrap()
+            .contains("?1"));
+    }
+}
+
+#[test]
+fn cli_execute_and_recovery_use_the_shared_runner() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("cli.db");
+    let created = Command::new(env!("CARGO_BIN_EXE_researchops"))
+        .arg("--db")
+        .arg(&db)
+        .args(["create", "--spec"])
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/research.json"))
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let id = String::from_utf8(created.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let executed = Command::new(env!("CARGO_BIN_EXE_researchops"))
+        .arg("--db")
+        .arg(&db)
+        .args(["execute", "--run", &id, "--trigger", "recovery"])
+        .output()
+        .unwrap();
+    assert!(
+        executed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    let result: Value = serde_json::from_slice(&executed.stdout).unwrap();
+    assert_eq!(result["business_status"], "PARTIAL");
+    assert_eq!(result["after"]["readback_verified"], 3);
+    let recovery = Command::new(env!("CARGO_BIN_EXE_researchops"))
+        .arg("--db")
+        .arg(&db)
+        .args(["recovery", "--run", &id])
+        .output()
+        .unwrap();
+    assert!(recovery.status.success());
+    let value: Value = serde_json::from_slice(&recovery.stdout).unwrap();
+    assert_eq!(value["runs"][0]["run_id"], id);
 }

@@ -70,6 +70,7 @@ pub struct RunView {
     pub covered_questions: usize,
     pub tasks: Vec<TaskView>,
     pub agent_events: Vec<AgentEvent>,
+    pub execution: crate::execution::ExecutionView,
 }
 
 #[derive(Debug, Serialize)]
@@ -91,7 +92,7 @@ pub struct Snapshot {
     pub content_hash: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Claim {
     pub task_id: String,
     pub run_id: String,
@@ -106,7 +107,7 @@ pub struct WorkResult {
 }
 
 pub struct Engine {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 impl Engine {
@@ -115,11 +116,46 @@ impl Engine {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")?;
-        conn.execute_batch(include_str!("../migrations/001_initial.sql"))?;
-        conn.execute_batch(include_str!("../migrations/002_agents.sql"))?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version > 4 {
+            bail!("database schema is newer than this application");
+        }
+        if version < 4 {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let current: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+            if current < 1 {
+                tx.execute_batch(include_str!("../migrations/001_initial.sql"))?;
+            }
+            if current < 2 {
+                tx.execute_batch(include_str!("../migrations/002_agents.sql"))?;
+            }
+            if current < 3 {
+                tx.execute_batch(include_str!("../migrations/003_execution.sql"))?;
+                crate::contracts::install_default(&tx, now())?;
+                for table in [
+                    "execution_contracts",
+                    "execution_batches",
+                    "batch_readbacks",
+                    "model_review_receipts",
+                    "report_artifacts",
+                    "artifact_readbacks",
+                    "sources",
+                    "agent_answers",
+                    "agent_events",
+                ] {
+                    for action in ["UPDATE", "DELETE"] {
+                        tx.execute_batch(&format!("CREATE TRIGGER {table}_no_{action} BEFORE {action} ON {table} BEGIN SELECT RAISE(ABORT,'append-only ledger'); END;"))?;
+                    }
+                }
+            }
+            if current < 4 {
+                tx.execute_batch(include_str!("../migrations/004_ledger_guards.sql"))?;
+            }
+            tx.commit()?;
+        }
         Ok(Self { conn })
     }
 
@@ -138,9 +174,10 @@ impl Engine {
             )?;
         }
         for source in spec.sources {
-            tx.execute("INSERT OR IGNORE INTO sources(id,run_id,title,uri,content,content_hash) VALUES(?1,?2,?3,?4,?5,?6)",
+            tx.execute("INSERT INTO sources(id,run_id,title,uri,content,content_hash) SELECT ?1,?2,?3,?4,?5,?6 WHERE NOT EXISTS(SELECT 1 FROM sources WHERE run_id=?2 AND content_hash=?6)",
                 params![Uuid::new_v4().to_string(),id,source.title.trim(),source.uri,source.content,hash(&source.content)])?;
         }
+        crate::contracts::bind_default(&tx, &id)?;
         tx.commit()?;
         Ok(id)
     }
@@ -206,6 +243,7 @@ impl Engine {
             covered_questions: covered,
             tasks,
             agent_events: self.events(id)?,
+            execution: self.execution_view(id)?,
         })
     }
 
@@ -229,7 +267,20 @@ impl Engine {
         status: &str,
         message: &str,
     ) -> Result<()> {
-        let changed = self.conn.execute("INSERT INTO agent_events(task_id,run_id,role,round,status,message,created_at) SELECT id,run_id,?4,?5,?6,?7,?8 FROM tasks WHERE id=?1 AND run_id=?2 AND status='running' AND lease_token=?3 AND lease_until>?8",params![claim.task_id,claim.run_id,claim.token,role,round,status,message,now()])?;
+        self.event_at(claim, role, round, status, message, now())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn event_at(
+        &mut self,
+        claim: &Claim,
+        role: &str,
+        round: i64,
+        status: &str,
+        message: &str,
+        at: i64,
+    ) -> Result<()> {
+        let changed = self.conn.execute("INSERT INTO agent_events(task_id,run_id,lease_token,role,round,status,message,created_at) SELECT id,run_id,?3,?4,?5,?6,?7,?8 FROM tasks WHERE id=?1 AND run_id=?2 AND status='running' AND lease_token=?3 AND lease_until>?8",params![claim.task_id,claim.run_id,claim.token,role,round,status,message,at])?;
         if changed != 1 {
             bail!("lease expired or claim superseded; event rejected");
         }
@@ -237,7 +288,10 @@ impl Engine {
     }
 
     pub fn reject(&mut self, claim: &Claim, message: &str) -> Result<()> {
-        let changed=self.conn.execute("UPDATE tasks SET status='failed',last_error=?4,lease_token=NULL,lease_until=NULL WHERE id=?1 AND run_id=?2 AND status='running' AND lease_token=?3 AND lease_until>?5",params![claim.task_id,claim.run_id,claim.token,message,now()])?;
+        self.reject_at(claim, message, now())
+    }
+    pub(crate) fn reject_at(&mut self, claim: &Claim, message: &str, at: i64) -> Result<()> {
+        let changed=self.conn.execute("UPDATE tasks SET status='failed',last_error=?4,lease_token=NULL,lease_until=NULL WHERE id=?1 AND run_id=?2 AND status='running' AND lease_token=?3 AND lease_until>?5",params![claim.task_id,claim.run_id,claim.token,message,at])?;
         if changed != 1 {
             bail!("lease expired or claim superseded; rejection refused");
         }
@@ -252,6 +306,10 @@ impl Engine {
 
     // Every delivery gets a new fencing token. Expired workers cannot commit.
     pub fn claim(&mut self, run_id: &str, at: i64, lease_seconds: i64) -> Result<Option<Claim>> {
+        let policy = self.checked_policy(run_id)?;
+        if policy.profile == crate::contracts::Profile::WeeklyReport {
+            bail!("weekly report adapters unavailable");
+        }
         if !(1..=3600).contains(&lease_seconds) {
             bail!("lease_seconds must be 1..3600");
         }
@@ -259,7 +317,7 @@ impl Engine {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute("UPDATE tasks SET status='failed',lease_token=NULL,lease_until=NULL,last_error='retry limit reached after worker lease expired' WHERE run_id=?1 AND status='running' AND lease_until<=?2 AND attempts>=3", params![run_id,at])?;
-        let row = tx.query_row("SELECT id,question FROM tasks WHERE run_id=?1 AND attempts<3 AND ((status='pending' AND available_at<=?2) OR (status='running' AND lease_until<=?2)) ORDER BY rowid LIMIT 1", params![run_id,at], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).optional()?;
+        let row = tx.query_row("SELECT id,question FROM tasks WHERE run_id=?1 AND attempts<3 AND ((status='pending' AND available_at<=?2) OR (status='running' AND lease_until<=?2)) ORDER BY (attempts>0) DESC,rowid LIMIT 1", params![run_id,at], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).optional()?;
         let claim = if let Some((task_id, question)) = row {
             let token = Uuid::new_v4().to_string();
             tx.execute("UPDATE tasks SET status='running',attempts=attempts+1,lease_token=?2,lease_until=?3 WHERE id=?1",params![task_id,token,at+lease_seconds])?;
@@ -323,6 +381,16 @@ impl Engine {
         self.finish_result(claim, findings, Some(answer), now())
     }
 
+    pub(crate) fn finish_agent_at(
+        &mut self,
+        claim: &Claim,
+        findings: &[Finding],
+        answer: &str,
+        at: i64,
+    ) -> Result<()> {
+        self.finish_result(claim, findings, Some(answer), at)
+    }
+
     fn finish_result(
         &mut self,
         claim: &Claim,
@@ -350,16 +418,26 @@ impl Engine {
             {
                 bail!("evidence does not match the stored source snapshot");
             }
-            tx.execute("INSERT OR IGNORE INTO findings(task_id,source_id,quote,score,verification) VALUES(?1,?2,?3,?4,'exact_quote')",params![claim.task_id,finding.source_id,finding.quote,finding.score])?;
+            tx.execute("INSERT INTO findings(task_id,source_id,quote,score,verification) SELECT ?1,?2,?3,?4,'exact_quote' WHERE NOT EXISTS(SELECT 1 FROM findings WHERE task_id=?1 AND source_id=?2 AND quote=?3)",params![claim.task_id,finding.source_id,finding.quote,finding.score])?;
         }
         if let Some(answer) = answer {
+            let approved:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM agent_events WHERE task_id=?1 AND lease_token=?2 AND role='verifier' AND status='approved')",params![claim.task_id,claim.token],|r|r.get(0))?;
+            if !approved {
+                bail!("model answer lacks a verifier receipt for this delivery");
+            }
             tx.execute(
                 "INSERT INTO agent_answers(task_id,answer) VALUES(?1,?2)",
                 params![claim.task_id, answer],
             )?;
+            tx.execute("INSERT INTO model_review_receipts(task_id,lease_token,answer_sha256,reviewed_at) VALUES(?1,?2,?3,?4)",params![claim.task_id,claim.token,hash(answer),at])?;
         }
+        crate::checkpoints::append_checkpoint(&tx, claim, at)?;
         tx.commit()?;
-        Ok(())
+        (|| {
+            let retries = self.checked_policy(&claim.run_id)?.sql_retries;
+            crate::execution::sql_retry(retries, || self.verify_checkpoint(&claim.task_id))
+        })()
+        .context(crate::execution::CheckpointReadbackFailure)
     }
 
     pub fn fail(&mut self, claim: &Claim, message: &str, at: i64) -> Result<()> {
@@ -374,6 +452,7 @@ impl Engine {
         if !(1..=1000).contains(&limit) {
             bail!("limit must be 1..1000");
         }
+        self.authorize_mode(id, crate::contracts::Mode::Local)?;
         self.get(id)?;
         let mut processed = 0;
         for _ in 0..limit {

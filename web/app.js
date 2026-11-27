@@ -3,6 +3,7 @@ let active = null;
 let busy = false;
 let connected = false;
 let selectedRun = null;
+let contractOptions = [];
 
 function node(tag, cls, text) {
   const element = document.createElement(tag);
@@ -25,7 +26,7 @@ async function api(url, body, method = 'POST') {
 
 function setBusy(value) {
   busy = value;
-  for (const id of ['create', 'example', 'add-source', 'refresh']) $(id).disabled = value;
+  for (const id of ['create', 'example', 'add-source', 'refresh', 'contract-picker', 'inspect-recovery']) $(id).disabled = value;
   $('agent-mode').disabled = value || !connected;
   for (const id of ['resume', 'retry']) if ($(id)) $(id).disabled = value;
   if (!value && selectedRun) render(selectedRun);
@@ -101,7 +102,9 @@ function render(run) {
   const root = $('workspace');
   root.replaceChildren();
   const body = node('div', 'panel-body');
-  body.append(node('span', 'status ' + run.status, run.agent_active ? 'agents working' : run.status),
+  const execution = run.execution;
+  const business = execution ? execution.business_status : run.status;
+  body.append(node('span', 'status ' + (business === 'COMPLETE' ? 'complete' : 'partial'), run.agent_active ? 'executing' : business),
     node('h2', 'run-title', run.objective), node('div', 'run-id', run.id));
   const stats = node('div', 'stats');
   for (const [value, label] of [
@@ -114,14 +117,40 @@ function render(run) {
     stats.append(stat);
   }
   body.append(stats);
+  if (execution) {
+    const session = execution.latest;
+    body.append(node('div', 'execution-state', `System: ${session ? session.system_status : 'no Runner session'} · Business: ${business} · Scope: ${execution.completion_scope}`));
+    if (session) {
+      body.append(node('small', '', `Trigger: ${session.trigger} · KST: ${session.start_kst_date}${session.end_kst_date ? ' → ' + session.end_kst_date : ''} · Elapsed: ${session.elapsed_ms} ms / ${session.budget_seconds}s`));
+      if (session.stop_code) body.append(node('small', '', `Stop: ${session.stop_code} · Last success: ${session.last_successful_stage || 'none recorded'} · Failure stage: ${session.failure_stage || 'none'}`));
+      if (session.error) body.append(node('div', 'error', session.error));
+      if (session.before && session.after) body.append(node('small', '', `Processed: ${session.before.succeeded} → ${session.after.succeeded} · Readbacks: ${session.before.readback_verified} → ${session.after.readback_verified}`));
+    }
+    if (execution.gate_failures.length) {
+      const gates = node('div', 'gate-list');
+      gates.append(node('strong', '', 'Completion gates still open'));
+      const list = node('ul');
+      execution.gate_failures.forEach(gate => list.append(node('li', '', gate)));
+      gates.append(list);
+      body.append(gates);
+    }
+    const resumeDetails = node('details', 'activity');
+    resumeDetails.append(node('summary', '', 'SQL resume position'));
+    resumeDetails.append(node('pre', 'resume-sql', JSON.stringify(execution.resume, null, 2)));
+    body.append(resumeDetails);
+  }
   const actions = node('div', 'actions');
   const resume = node('button', 'btn primary', 'Process / resume');
   resume.id = 'resume';
-  resume.disabled = busy || run.agent_active || ['complete', 'partial'].includes(run.status);
-  resume.onclick = () => processRun(run.id, run.agent_events.length > 0).catch(showError);
+  resume.disabled = busy || run.agent_active || business === 'COMPLETE';
+  resume.onclick = () => processRun(run.id, run.agent_events.length > 0 || execution?.latest?.mode === 'agents').catch(showError);
   const report = node('a', 'btn', '↓ Export Markdown');
   report.href = '/api/runs/' + run.id + '/report';
   actions.append(resume, report);
+  const recoveryLink = node('a', 'btn', 'Recovery JSON');
+  recoveryLink.href = '/api/runs/' + run.id + '/recovery';
+  recoveryLink.download = 'researchops-recovery.json';
+  actions.append(recoveryLink);
   if (run.tasks.some(task => task.status === 'failed' && task.attempts < 3)) {
     const retry = node('button', 'btn', 'Retry failed tasks');
     retry.id = 'retry';
@@ -129,7 +158,7 @@ function render(run) {
     retry.onclick = async () => {
       try {
         await api('/api/runs/' + run.id + '/retry', {});
-        await processRun(run.id, run.agent_events.length > 0);
+        await processRun(run.id, run.agent_events.length > 0 || execution?.latest?.mode === 'agents');
       } catch (error) { showError(error); }
     };
     actions.append(retry);
@@ -188,7 +217,8 @@ async function pollRun(id) {
 
 async function processRun(id, forceAgents = false) {
   if (busy) return;
-  const useAgents = forceAgents || $('agent-mode').checked;
+  const knownMode = selectedRun?.id === id ? selectedRun.execution?.latest?.mode : null;
+  const useAgents = knownMode ? knownMode === 'agents' : forceAgents || $('agent-mode').checked;
   if (useAgents && !connected) {
     $('connection-dialog').showModal();
     throw Error('Connect and test your API before starting agent mode.');
@@ -196,14 +226,8 @@ async function processRun(id, forceAgents = false) {
   setBusy(true);
   $('workspace-error').textContent = '';
   try {
-    if (useAgents) {
-      await api('/api/runs/' + id + '/agents', {});
-      await pollRun(id);
-    } else {
-      const result = await api('/api/runs/' + id + '/work', {});
-      active = id;
-      render(result.run);
-    }
+    await api('/api/runs/' + id + '/execute', {mode: useAgents ? 'agents' : 'local', trigger: 'manual'});
+    await pollRun(id);
   } finally { setBusy(false); await refresh(); }
 }
 
@@ -268,8 +292,13 @@ $('research-form').onsubmit = async event => {
   try {
     const result = await api('/api/runs', getSpec());
     id = result.id;
+    const contract = contractOptions.find(value => value.version === $('contract-picker').value);
+    if (contract) await api('/api/runs/' + id + '/contract', {version: contract.version, expected_md5: contract.md5});
     await selectRun(id);
-  } catch (error) { $('form-error').textContent = error.message; }
+  } catch (error) {
+    id = undefined;
+    $('form-error').textContent = error.message;
+  }
   finally { setBusy(false); }
   if (id) await processRun(id).catch(showError);
 };
@@ -285,5 +314,33 @@ $('example').onclick = async () => {
 $('add-source').onclick = () => addSource();
 $('refresh').onclick = () => (active ? selectRun(active) : refresh()).catch(showError);
 addSource();
+api('/api/contracts').then(contracts => {
+  contractOptions = contracts;
+  $('contract-picker').replaceChildren();
+  for (const contract of contracts) {
+    const policy = JSON.parse(contract.body);
+    const option = node('option', '', `${contract.version} · ${policy.max_runtime_seconds}s · batch ${policy.batch_size}`);
+    option.value = contract.version;
+    option.selected = contract.version === 'researchops-evidence-v1';
+    $('contract-picker').append(option);
+  }
+}).catch(showError);
+$('inspect-recovery').onclick = async () => {
+  try {
+    const result = await api('/api/recovery');
+    const panel = $('recovery-panel');
+    panel.replaceChildren(node('h3', '', 'Unfinished workflows'));
+    if (result.database_error) panel.append(node('div', 'error', result.database_error));
+    for (const candidate of result.runs) {
+      const entry = node('div', 'recovery-entry');
+      const open = node('button', 'text-btn', candidate.run_id);
+      open.onclick = () => selectRun(candidate.run_id).catch(showError);
+      entry.append(open, node('small', '', `${candidate.execution.business_status} · ${candidate.execution.gate_failures.join(', ')}`));
+      panel.append(entry);
+    }
+    panel.append(node('small', '', `${result.files.length} local recovery file(s). Selecting a run does not start it.`));
+    if (!result.runs.length && !result.database_error) panel.append(node('p', '', 'No unfinished workflows.'));
+  } catch (error) { showError(error); }
+};
 api('/api/connection').then(connectionStatus).catch(showError);
 refresh().then(runs => { if (runs.length) return selectRun(runs[0].id); }).catch(showError);

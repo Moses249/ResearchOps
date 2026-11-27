@@ -1,4 +1,4 @@
-> **phase:** design · Plan approved 2026-11-27 · owner @Moses249
+> **phase:** release · Design + tasks approved 2026-11-28 · owner @Moses249
 
 # Feature: execution-completion-contract
 
@@ -179,7 +179,7 @@ The design checkpoint approves this proposal. The live checklist is added to iss
 | T7 | API/CLI and legacy compatibility | AC-1, AC-6, AC-8, AC-10, AC-11 |
 | T8 | UI contracts, system/business state, gates, resume/accessibility | AC-6, AC-8, AC-12 |
 | T9 | Failure/time/restart/concurrency/compatibility tests and docs | AC-1–AC-12 |
-| T10 | Fresh read-only QA, defect regression, Draft PR evidence | AC-1–AC-12 |
+| T10 | Independent QA preparation and Draft PR evidence (verification runs in test phase) | AC-1–AC-12 |
 
 ### Risks and alternatives
 
@@ -187,4 +187,80 @@ Use a new execution route instead of changing bounded legacy semantics; test tha
 
 ## Verification
 
-Record independent AC-specific observations after approved implementation. Do not reuse baseline tests or unverified draft code as a PASS for this feature.
+- **verdict:** PASS — all AC-1–12; final snapshot regression independently closed.
+- **Tester:** `/root/independent_qa` (fresh read-only QA; incremental re-test by the same independent tester).
+- **Reviewed range:** `origin/main..0dd4b84`, then fix `0dd4b84..aaeb482`.
+- **Final local gate:** 41 tests passed (provider 2, agents 5, execution 15, HTTP/CLI 5, migration 3, reliability 11); fmt, Clippy, build and naming passed. HTTP tests also passed after the owned-port harness correction.
+
+### Implementation gate evidence (2026-11-28)
+
+39 local tests passed: provider 2, agents 5, execution contract 14, HTTP/CLI 5, migration 2, reliability 11. `scripts/dev.ps1 fmt`, `clippy`, `build`, and `scripts/check-conventions.ps1` passed. The full-suite invocation was `scripts/dev.ps1 test`; HTTP/model tests used local mocks, not production adapters.
+
+Browser verification exercised contract selection, shared execution, textual states, recovery candidates and parameterized resume SQL. A three-question fixture produced system `completed`, business `PARTIAL`, three readbacks and an evidence gap. A fully supported one-question run produced system `completed`, business `COMPLETE`, one readback and no gates. A separate JavaScript failure injection confirmed a rejected contract binding never starts execution.
+
+### Independent QA round 1
+
+- **Tester:** `/root/independent_qa` (fresh read-only agent).
+- **Reviewed head:** `0dd4b84`.
+- **verdict:** FAIL (AC-4, AC-8); AC-1–3, AC-5–7, AC-9–12 passed the independent cases.
+- Direct findings UPDATE was accepted; SQLite REPLACE could bypass DELETE guards with recursive triggers off; a committed checkpoint followed by a receipt failure reported the task-processing stage instead of checkpoint readback.
+- Returned to implement; T2, T6 and T9 reopened. Fix scope: v4 immutable-ledger collision/observation guards, v3 upgrade preservation, safe idempotent insert callsites and typed post-commit stage diagnostics. Windows CI additionally exposed a wall-clock-dependent one-second budget test, replaced with an injected clock.
+
+Independent re-verification is required for this incremental fix. Implementation and mock evidence do not establish production completion.
+
+### Independent coverage (round 1, retained for unchanged behavior)
+
+| AC | Performed boundary / negative cases and observed result | Result |
+| --- | --- | --- |
+| AC-1 | Seven minimum/maximum/out-of-range limit combinations and two unsupported policies; invalid policies rejected, reviewed-policy local start rejected with zero attempts. Digest/mode gate tests inspected. | PASS |
+| AC-2 | Three supported questions, batch one: one session, three successes/readbacks, COMPLETE. Invalid/empty specs covered by the main gate. | PASS |
+| AC-3 | Retried task before fresh task; other run stayed at zero attempts; active duplicate rejected before claims. Concurrent/stale-token gate evidence inspected. | PASS |
+| AC-4 | Injected checkpoint failure rolled back findings and task transition; tampering blocked COMPLETE. Findings UPDATE and immutable-row REPLACE were accepted. | FAIL; fix requires re-test |
+| AC-5 | Delayed retry completed after approximately 2.2 seconds; next eligibility beyond a one-second budget returned PARTIAL with its timestamp. | PASS |
+| AC-6 | Evidence gap produced system completed/business PARTIAL with legacy partial; changed objective invalidated artifact/finalization. Actual model-proof gate inspected. | PASS |
+| AC-7 | Post-commit receipt interruption repaired in a fresh invocation, attempts remained one and exactly one receipt. Bounded transient/semantic retry gate evidence inspected. | PASS |
+| AC-8 | Injected Authorization error redacted; counts and bound SQL present. DB failure exported discoverable JSON with unknown counts null; DB plus file failure reported both. Post-commit stage was incorrect. | FAIL; fix requires re-test |
+| AC-9 | Maximum limits accepted and invalid limits rejected; budget boundary preserved eligibility; expired session recorded interrupted/session_lease_expired with unknown cause. Monotonic exhaustion gate inspected. | PASS |
+| AC-10 | Three CLI triggers gave equivalent gap outcomes across fresh processes; missing provider left attempts zero. Restored agent UI requested reconnect and made zero execute calls. | PASS |
+| AC-11 | v1/v2 historical findings and v2 answer/verifier event retained with original timestamps, zero invented storage/model receipts; objective changes invalidated stale artifacts. | PASS |
+| AC-12 | Weekly fixture and bounded-route bypass remained blocked by external proof gates. Auth error redacted. Plain-text rendering, labeled native selector, buttons/details/summary and alert semantics inspected. | PASS |
+
+### Dimensions exercised
+
+| Dimension | Disposition and evidence |
+| --- | --- |
+| Functional / boundaries / errors | Applied across AC-1–12 through independent CLI/SQLite and JavaScript VM probes. |
+| State / data integrity | Applied: atomic rollback, receipt interruption, mutations, replacement collision, current-input artifacts and history. |
+| Concurrency / recovery | Applied: active duplicate, scope/priority probes; main-gate stale/concurrent claim results reviewed. |
+| API / schema / compatibility | Applied: actual migrations plus legacy CLI and HTTP route dependency review. |
+| Privacy / accessibility | Applied within local scope: structured policies, redaction/allowlist, plain-text rendering and native keyboard controls. No screen-reader certification asserted. |
+| Regression | **Applied.** Full changed definitions and callers checked: Engine create/get/list/claim/work/finish/report; contracts; checkpoints/artifacts; Runner; agent preflight/background processing; provider; HTTP execute/work/agents/report/recovery; CLI execute/work/status/list/report/demo; dashboard create/bind/process/poll/retry/resume. |
+| Production / multi-host / scheduler | Skipped: explicitly outside scope; fixtures prove no external delivery. |
+| Performance benchmarks | Skipped: no throughput/latency AC; execution-budget boundaries were exercised. |
+
+Independent evidence was generated in ignored local scratch: seventeen probe groups, five supplemental migration/fallback/preflight probes, UI reconnect checks, replacement and stage reproductions. Private local data and recovery files are not published. Round 1 reused the performed 39-test main gate instead of rerunning it.
+
+### Independent round 2 — incremental fixes
+
+| Criteria | Expected and observed result | Result |
+| --- | --- | --- |
+| AC-1, AC-4 | Findings UPDATE/DELETE rejected. All 14 immutable collision identities rejected with recursive triggers off, including alternate unique keys and frozen binding. | PASS |
+| AC-1, AC-3 | Scope movement, post-start rebinding and conflicting execution mode rejected; stored binding/mode unchanged. | PASS |
+| AC-4, AC-7 | Three repeated report/recovery invocations retained COMPLETE, sources/batches/artifacts 1/1/1, attempts 1. | PASS |
+| AC-7, AC-8 | Post-commit receipt failure recorded `checkpoint_commit` then `checkpoint_readback`, succeeded 1/readbacks 0. Recovery reached COMPLETE/readback 1 with attempts still 1. Pre-commit failure correctly retained task_processing/succeeded 0. | PASS |
+| AC-11 | All rows in 14 v3 tables unchanged after v4 upgrade; mutation guards installed; repeat open preserved data. | PASS |
+| AC-9, regression | Virtual clock advances only on requested sleep. Four independently launched concurrent port-zero HTTP servers had distinct owned ports and isolated run identities. | PASS |
+
+Regression dimension remains applied to migration, persistence, receipts/artifacts, typed error propagation, Runner, budget tests and HTTP startup callers. Unchanged AC cases retain round 1 PASS. The independent tester reused the performed 41-test main gate instead of repeating the full suite. Parent browser regression additionally verified persisted COMPLETE after restart and Enter/Tab/Escape API-dialog control. This remains supplied-document completion only; no production adapter/delivery proof is asserted.
+
+### Final CI snapshot regression
+
+CI run `46047562814` observed an inactive job flag paired with a previously read running SQL snapshot. Returned to implement (T7/T9, AC-6). The detail handler now holds the job-state mutex only inside the synchronous database callback while reading and serializing the run plus flag. Reservation and job termination cannot interleave that read; no mutex spans an await. The existing completion-boundary HTTP case now repeats eight runs and retains the strict terminal-state assertion. The 41-test local gate, fmt, Clippy and build passed after this correction; focused independent verification is pending.
+
+### Independent round 3 — snapshot regression closed
+
+Tester `/root/independent_qa` independently verified `2a07c03..b00a3cf`: **PASS**. Four execution streams, 40 runs and three pollers per run produced 2,403 snapshots, with zero inactive-worker/stale-running combinations. Both COMPLETE and evidence-gap PARTIAL had correct terminal state/readbacks.
+
+Missing-run and injected malformed-session JSON errors returned HTTP 400 and released the mutex; a subsequent run reserved and completed. Legacy bounded work processed one task without granting COMPLETE; missing-provider agents returned 400 and shared execution could subsequently resume. An injected checkpoint error produced inactive/failed/PARTIAL with the matching error. Lock/caller review found no mutex across await or reverse Engine-to-jobs dependency. The scratch server/database was isolated and stopped. Regression and error-handling dimensions remain applied; unaffected AC results are retained.
+
+Linux and Windows push/PR CI passed for `b00a3cf`. The final commit after this verification changes only this bilingual evidence/phase record; PR checks retain the current-head result. Merge and version release are maintainer decisions.

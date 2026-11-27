@@ -1,4 +1,4 @@
-> **phase:** design · Plan approved 2026-11-27 · owner @Moses249
+> **phase:** release · Design + tasks approved 2026-11-28 · owner @Moses249
 
 # Feature: execution-completion-contract
 
@@ -198,7 +198,7 @@ DB 재시도 helper에는 재실행이 안전한 operation만 전달한다. Busy
 | T7 | API/CLI와 legacy 호환 경로 연결 | AC-1, AC-6, AC-8, AC-10, AC-11 |
 | T8 | UI 계약·system/business 상태·Gate·resume·접근성 | AC-6, AC-8, AC-12 |
 | T9 | 오류/시간/재시작/동시성/호환 테스트·사용 문서 | AC-1~AC-12 |
-| T10 | fresh read-only QA·결함 회귀·Draft PR 증거 정리 | AC-1~AC-12 |
+| T10 | 독립 QA 준비·Draft PR 증거 정리 (실제 독립 검증은 test 단계) | AC-1~AC-12 |
 
 ### Risks and alternatives
 
@@ -211,4 +211,80 @@ DB 재시도 helper에는 재실행이 안전한 operation만 전달한다. Busy
 
 ## Verification
 
-승인된 설계에 따라 구현한 후 독립 QA의 AC별 관측 결과를 기록한다. 기존 테스트 결과나 구현 초안을 PASS로 전용하지 않는다.
+- **verdict:** PASS — AC-1–12 모두 통과, 최종 snapshot 회귀도 독립 재검증 완료.
+- **Tester:** `/root/independent_qa` (새 읽기 전용 QA; 동일 독립 검증자가 증분 재검증).
+- **검증 범위:** `origin/main..0dd4b84`, 이후 수정 `0dd4b84..aaeb482`.
+- **최종 로컬 게이트:** 41개 테스트 통과 (provider 2, agents 5, execution 15, HTTP/CLI 5, migration 3, reliability 11), fmt·Clippy·build·이름 규칙 통과. HTTP 소유 포트 수정 후 통합 테스트도 통과.
+
+### 구현 게이트 증거 (2026-11-28)
+
+로컬 전체 테스트 39개 통과: provider 2, agents 5, execution contract 14, HTTP/CLI 5, migration 2, reliability 11. `scripts/dev.ps1 fmt`, `clippy`, `build`, `scripts/check-conventions.ps1` 통과. 전체 실행 명령은 `scripts/dev.ps1 test`이며 HTTP/모델은 운영 연결 대신 로컬 mock으로 검증했다.
+
+브라우저에서 계약 선택, 공통 실행, 텍스트 상태, 복구 후보와 매개변수 SQL을 확인했다. 질문 3개 fixture는 system `completed`, business `PARTIAL`, readback 3개와 근거 누락을 표시했다. 근거가 충족된 질문 1개 실행은 system `completed`, business `COMPLETE`, readback 1개와 열린 게이트 없음으로 표시했다. 별도 JavaScript 실패 주입으로 계약 연결이 거부되면 실행하지 않는 것을 확인했다.
+
+### 독립 QA 1차
+
+- **Tester:** `/root/independent_qa` (새 읽기 전용 에이전트).
+- **검증 head:** `0dd4b84`.
+- **verdict:** FAIL (AC-4, AC-8); AC-1–3, AC-5–7, AC-9–12의 독립 검증 사례는 통과.
+- findings 직접 UPDATE 허용, recursive trigger가 꺼진 SQLite에서 REPLACE의 DELETE 보호 우회, checkpoint commit 이후 receipt 실패를 task-processing 단계로 오기하는 결함을 재현했다.
+- implement로 되돌리고 T2·T6·T9를 다시 열었다. 수정 범위는 v4 원장 충돌·관측 보호, v3 업그레이드 보존, 멱등 insert 호출, commit 이후의 typed 단계 진단이다. Windows CI에서 드러난 1초 예산 테스트의 실제 시간 의존성도 주입 시계로 바꿨다.
+
+증분 수정에 대한 독립 재검증이 필요하다. 위 구현·mock 증거는 운영 업무 완료의 증거가 아니다.
+
+### 독립 검증 범위 (1차, 변경 없는 동작의 결과 유지)
+
+| AC | 수행한 경계·실패 사례와 관측 결과 | 결과 |
+| --- | --- | --- |
+| AC-1 | 최소·최대·범위 밖 제한 7조합과 미지원 정책 2개: 잘못된 정책 거부, 검토 필수 정책의 local 실행은 attempts 0으로 거부. digest·mode 게이트 테스트 확인. | PASS |
+| AC-2 | 근거 있는 질문 3개, batch 1: 한 세션에서 success/readback 3개와 COMPLETE. 빈 입력·잘못된 spec은 전체 게이트에서 검증. | PASS |
+| AC-3 | 재시도 작업 우선, 다른 run attempts 0 유지, 활성 중복 세션은 claim 전에 거부. 동시·stale-token 게이트 증거 확인. | PASS |
+| AC-4 | checkpoint 실패 주입은 findings·task 전이를 rollback, 변조는 COMPLETE 차단. findings UPDATE와 원장 REPLACE는 허용됨. | FAIL; 수정 재검증 필요 |
+| AC-5 | 지연 재시도는 약 2.2초 후 완료. 다음 적격 시간이 1초 예산 밖이면 PARTIAL과 실제 timestamp 반환. | PASS |
+| AC-6 | 근거 누락 시 system completed/business PARTIAL 및 legacy partial. objective 변경 시 artifact·finalization 무효. 실제 모델 검토 증거 게이트 확인. | PASS |
+| AC-7 | commit 후 receipt 중단을 새 호출에서 복구, attempts 1 유지와 receipt 정확히 1개. transient 제한·semantic 무재실행 증거 확인. | PASS |
+| AC-8 | Authorization 오류 redaction, counts·binding SQL 확인. DB 실패 시 발견 가능한 JSON과 미확인 counts null, DB·파일 동시 실패도 표시. commit 이후 단계는 잘못 표시됨. | FAIL; 수정 재검증 필요 |
+| AC-9 | 최대 제한 허용·잘못된 제한 거부. 예산 경계에 다음 적격 시간 보존. 만료 세션은 interrupted/session_lease_expired와 원인 미확인 기록. 단조 시계 게이트 확인. | PASS |
+| AC-10 | 새 프로세스에서 세 CLI trigger가 같은 근거 누락 결과. provider 부재는 attempts 0. 복원한 agent UI는 재연결 창을 열고 execute 호출 0. | PASS |
+| AC-11 | v1/v2 실제 과거 findings, v2 answer·verifier event·timestamp 유지. 꾸며낸 storage/model receipt 0. objective 변경 시 과거 artifact 무효. | PASS |
+| AC-12 | weekly fixture와 bounded 우회는 외부 증거 게이트로 차단. auth redaction, 텍스트 렌더링, label 있는 native selector·button·details/summary·alert 의미 확인. | PASS |
+
+### Dimensions exercised
+
+| 차원 | 적용과 증거 |
+| --- | --- |
+| 기능·경계·오류 | 적용: AC-1–12의 독립 CLI/SQLite와 JavaScript VM 사례. |
+| 상태·데이터 무결성 | 적용: atomic rollback, receipt 중단, 수정·replacement 충돌, 현재 입력 artifact와 과거 데이터. |
+| 동시성·복구 | 적용: 활성 중복, scope·우선순위, 전체 게이트의 stale·동시 claim 결과 확인. |
+| API·schema·호환성 | 적용: 실제 migration과 legacy CLI·HTTP 호출 의존성 검토. |
+| 개인정보·접근성 | 로컬 범위 적용: 구조화 정책, redaction·allowlist, 텍스트와 native 키보드 컨트롤. screen reader 인증은 주장하지 않음. |
+| Regression | **적용.** 변경 정의와 호출자 확인: Engine create/get/list/claim/work/finish/report, contract, checkpoint/artifact, Runner, agent preflight/background, provider, HTTP execute/work/agents/report/recovery, CLI execute/work/status/list/report/demo, dashboard create/bind/process/poll/retry/resume. |
+| 운영·multi-host·scheduler | 제외: 명시적 범위 밖. fixture는 외부 전송 증거가 아님. |
+| 성능 benchmark | 제외: 처리량·latency AC 없음. 실행 예산 경계는 검증함. |
+
+독립 증거는 Git 제외 로컬 scratch에 생성했다: probe 17그룹, migration·fallback·preflight 추가 5그룹, UI 재연결, replacement·단계 재현. 비공개 로컬 데이터와 recovery 파일은 게시하지 않는다. 1차 QA는 전체 suite를 반복하지 않고 실제 수행된 39개 게이트 결과를 확인했다.
+
+### 독립 QA 2차 — 증분 수정
+
+| 기준 | 기대·실제 관측 결과 | 결과 |
+| --- | --- | --- |
+| AC-1, AC-4 | findings UPDATE/DELETE 거부. recursive trigger가 꺼진 상태에서도 대체 unique key·고정 binding을 포함한 원장 충돌 identity 14개 모두 거부. | PASS |
+| AC-1, AC-3 | scope 이동·시작 후 재연결·다른 실행 mode 모두 거부, 저장 binding/mode 유지. | PASS |
+| AC-4, AC-7 | report/recovery 3회 반복 후 COMPLETE 유지, sources/batches/artifacts 1/1/1 및 attempts 1 유지. | PASS |
+| AC-7, AC-8 | commit 후 receipt 실패는 `checkpoint_commit` 다음 `checkpoint_readback`, succeeded 1/readbacks 0 기록. 복구 후 COMPLETE/readback 1, attempts 1 유지. commit 전 실패는 task_processing/succeeded 0으로 정확히 구분. | PASS |
+| AC-11 | v3의 14개 테이블 모든 행이 v4 업그레이드 후 동일, 보호 설치·재오픈 보존 확인. | PASS |
+| AC-9, regression | 주입 시계는 요청한 sleep에서만 증가. 독립적으로 동시에 실행한 port-zero HTTP 서버 4개가 서로 다른 소유 포트와 분리된 run identity 반환. | PASS |
+
+Regression 차원은 migration·persistence·receipt/artifact·typed 오류·Runner·예산 테스트·HTTP 시작 호출자에 계속 적용했다. 변경 없는 AC는 1차 PASS를 유지한다. 독립 검증자는 전체 suite를 반복하지 않고 실제 수행된 41개 게이트를 확인했다. 주 에이전트의 브라우저 회귀도 재시작 후 기존 COMPLETE 보존과 API 창 Enter/Tab/Escape 조작을 확인했다. 완료 범위는 제공 문서이며 운영 adapter·전송 증거는 주장하지 않는다.
+
+### 최종 CI snapshot 회귀
+
+CI `46047562814`에서 비활성 job flag와 이전에 읽은 running SQL snapshot의 조합을 관측했다. implement로 되돌리고 T7/T9·AC-6을 다시 열었다. detail handler는 동기 DB callback 내부에서만 job-state mutex를 잡고 run·flag를 함께 읽어 직렬화한다. 그 사이 예약·job 종료가 끼어들 수 없고 await를 가로질러 mutex를 보유하지 않는다. 기존 HTTP 완료 경계 사례는 8회 반복하며 엄격한 종료 상태 assertion을 유지한다. 수정 후 41개 로컬 테스트와 fmt·Clippy·build가 통과했으며 독립 재검증 대기 중이다.
+
+### 독립 QA 3차 — snapshot 회귀 해소
+
+Tester `/root/independent_qa`가 `2a07c03..b00a3cf`를 독립 재검증해 **PASS**. 동시 실행 stream 4개, run 40개, run별 poller 3개로 snapshot 2,403개를 읽었으며 비활성 worker·과거 running 조합은 0회였다. COMPLETE와 근거 누락 PARTIAL 모두 올바른 종료 상태·readback을 반환했다.
+
+없는 run·session JSON 오류 주입은 HTTP 400을 반환하고 mutex를 해제했으며 이후 run 예약·완료가 정상 작동했다. legacy bounded work는 작업 1개만 처리하고 COMPLETE를 부여하지 않았고 provider 없는 agents는 400 후 공통 실행으로 재개됐다. checkpoint 실패 주입은 비활성/failed/PARTIAL과 일치하는 오류를 표시했다. 잠금·호출자 검토에서 await를 가로지르는 mutex나 Engine→jobs 역방향 의존성은 없었다. 독립 scratch 서버·DB를 사용하고 종료했다. Regression·오류 차원을 계속 적용하며 변경 없는 AC 결과는 유지한다.
+
+`b00a3cf`의 Linux·Windows push/PR CI 통과. 이후 최종 커밋은 한·영 증거·phase 기록만 변경하며 현재 head 결과는 PR checks에서 확인한다. 병합·버전 출시는 관리자가 결정한다.
