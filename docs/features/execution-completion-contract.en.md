@@ -1,4 +1,4 @@
-> **phase:** test · Design + tasks approved 2026-11-28 · owner @Moses249
+> **phase:** release · Design + tasks approved 2026-11-28 · owner @Moses249
 
 # Feature: execution-completion-contract
 
@@ -187,6 +187,11 @@ Use a new execution route instead of changing bounded legacy semantics; test tha
 
 ## Verification
 
+- **verdict:** PASS — independent round 2 closes round 1 defects; all AC-1–12 pass.
+- **Tester:** `/root/independent_qa` (fresh read-only QA; incremental re-test by the same independent tester).
+- **Reviewed range:** `origin/main..0dd4b84`, then fix `0dd4b84..aaeb482`.
+- **Final local gate:** 41 tests passed (provider 2, agents 5, execution 15, HTTP/CLI 5, migration 3, reliability 11); fmt, Clippy, build and naming passed. HTTP tests also passed after the owned-port harness correction.
+
 ### Implementation gate evidence (2026-11-28)
 
 39 local tests passed: provider 2, agents 5, execution contract 14, HTTP/CLI 5, migration 2, reliability 11. `scripts/dev.ps1 fmt`, `clippy`, `build`, and `scripts/check-conventions.ps1` passed. The full-suite invocation was `scripts/dev.ps1 test`; HTTP/model tests used local mocks, not production adapters.
@@ -234,3 +239,16 @@ Independent re-verification is required for this incremental fix. Implementation
 | Performance benchmarks | Skipped: no throughput/latency AC; execution-budget boundaries were exercised. |
 
 Independent evidence was generated in ignored local scratch: seventeen probe groups, five supplemental migration/fallback/preflight probes, UI reconnect checks, replacement and stage reproductions. Private local data and recovery files are not published. Round 1 reused the performed 39-test main gate instead of rerunning it.
+
+### Independent round 2 — incremental fixes
+
+| Criteria | Expected and observed result | Result |
+| --- | --- | --- |
+| AC-1, AC-4 | Findings UPDATE/DELETE rejected. All 14 immutable collision identities rejected with recursive triggers off, including alternate unique keys and frozen binding. | PASS |
+| AC-1, AC-3 | Scope movement, post-start rebinding and conflicting execution mode rejected; stored binding/mode unchanged. | PASS |
+| AC-4, AC-7 | Three repeated report/recovery invocations retained COMPLETE, sources/batches/artifacts 1/1/1, attempts 1. | PASS |
+| AC-7, AC-8 | Post-commit receipt failure recorded `checkpoint_commit` then `checkpoint_readback`, succeeded 1/readbacks 0. Recovery reached COMPLETE/readback 1 with attempts still 1. Pre-commit failure correctly retained task_processing/succeeded 0. | PASS |
+| AC-11 | All rows in 14 v3 tables unchanged after v4 upgrade; mutation guards installed; repeat open preserved data. | PASS |
+| AC-9, regression | Virtual clock advances only on requested sleep. Four independently launched concurrent port-zero HTTP servers had distinct owned ports and isolated run identities. | PASS |
+
+Regression dimension remains applied to migration, persistence, receipts/artifacts, typed error propagation, Runner, budget tests and HTTP startup callers. Unchanged AC cases retain round 1 PASS. The independent tester reused the performed 41-test main gate instead of repeating the full suite. Parent browser regression additionally verified persisted COMPLETE after restart and Enter/Tab/Escape API-dialog control. This remains supplied-document completion only; no production adapter/delivery proof is asserted.

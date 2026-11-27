@@ -1,4 +1,4 @@
-> **phase:** test · Design + tasks approved 2026-11-28 · owner @Moses249
+> **phase:** release · Design + tasks approved 2026-11-28 · owner @Moses249
 
 # Feature: execution-completion-contract
 
@@ -211,6 +211,11 @@ DB 재시도 helper에는 재실행이 안전한 operation만 전달한다. Busy
 
 ## Verification
 
+- **verdict:** PASS — 2차 독립 검증에서 1차 결함 해소, AC-1–12 모두 통과.
+- **Tester:** `/root/independent_qa` (새 읽기 전용 QA; 동일 독립 검증자가 증분 재검증).
+- **검증 범위:** `origin/main..0dd4b84`, 이후 수정 `0dd4b84..aaeb482`.
+- **최종 로컬 게이트:** 41개 테스트 통과 (provider 2, agents 5, execution 15, HTTP/CLI 5, migration 3, reliability 11), fmt·Clippy·build·이름 규칙 통과. HTTP 소유 포트 수정 후 통합 테스트도 통과.
+
 ### 구현 게이트 증거 (2026-11-28)
 
 로컬 전체 테스트 39개 통과: provider 2, agents 5, execution contract 14, HTTP/CLI 5, migration 2, reliability 11. `scripts/dev.ps1 fmt`, `clippy`, `build`, `scripts/check-conventions.ps1` 통과. 전체 실행 명령은 `scripts/dev.ps1 test`이며 HTTP/모델은 운영 연결 대신 로컬 mock으로 검증했다.
@@ -258,3 +263,16 @@ DB 재시도 helper에는 재실행이 안전한 operation만 전달한다. Busy
 | 성능 benchmark | 제외: 처리량·latency AC 없음. 실행 예산 경계는 검증함. |
 
 독립 증거는 Git 제외 로컬 scratch에 생성했다: probe 17그룹, migration·fallback·preflight 추가 5그룹, UI 재연결, replacement·단계 재현. 비공개 로컬 데이터와 recovery 파일은 게시하지 않는다. 1차 QA는 전체 suite를 반복하지 않고 실제 수행된 39개 게이트 결과를 확인했다.
+
+### 독립 QA 2차 — 증분 수정
+
+| 기준 | 기대·실제 관측 결과 | 결과 |
+| --- | --- | --- |
+| AC-1, AC-4 | findings UPDATE/DELETE 거부. recursive trigger가 꺼진 상태에서도 대체 unique key·고정 binding을 포함한 원장 충돌 identity 14개 모두 거부. | PASS |
+| AC-1, AC-3 | scope 이동·시작 후 재연결·다른 실행 mode 모두 거부, 저장 binding/mode 유지. | PASS |
+| AC-4, AC-7 | report/recovery 3회 반복 후 COMPLETE 유지, sources/batches/artifacts 1/1/1 및 attempts 1 유지. | PASS |
+| AC-7, AC-8 | commit 후 receipt 실패는 `checkpoint_commit` 다음 `checkpoint_readback`, succeeded 1/readbacks 0 기록. 복구 후 COMPLETE/readback 1, attempts 1 유지. commit 전 실패는 task_processing/succeeded 0으로 정확히 구분. | PASS |
+| AC-11 | v3의 14개 테이블 모든 행이 v4 업그레이드 후 동일, 보호 설치·재오픈 보존 확인. | PASS |
+| AC-9, regression | 주입 시계는 요청한 sleep에서만 증가. 독립적으로 동시에 실행한 port-zero HTTP 서버 4개가 서로 다른 소유 포트와 분리된 run identity 반환. | PASS |
+
+Regression 차원은 migration·persistence·receipt/artifact·typed 오류·Runner·예산 테스트·HTTP 시작 호출자에 계속 적용했다. 변경 없는 AC는 1차 PASS를 유지한다. 독립 검증자는 전체 suite를 반복하지 않고 실제 수행된 41개 게이트를 확인했다. 주 에이전트의 브라우저 회귀도 재시작 후 기존 COMPLETE 보존과 API 창 Enter/Tab/Escape 조작을 확인했다. 완료 범위는 제공 문서이며 운영 adapter·전송 증거는 주장하지 않는다.
