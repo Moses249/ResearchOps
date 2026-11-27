@@ -1,4 +1,4 @@
-> **phase:** release · Design + tasks approved 2026-11-28 · owner @Moses249
+> **phase:** implement · Design + tasks approved 2026-11-28 · owner @Moses249
 
 # Feature: execution-completion-contract
 
@@ -187,7 +187,7 @@ Use a new execution route instead of changing bounded legacy semantics; test tha
 
 ## Verification
 
-- **verdict:** PASS — independent round 2 closes round 1 defects; all AC-1–12 pass.
+- **verdict:** FAIL — final CI reopened an AC-6 snapshot race; previous independent results are retained, with a focused re-test pending.
 - **Tester:** `/root/independent_qa` (fresh read-only QA; incremental re-test by the same independent tester).
 - **Reviewed range:** `origin/main..0dd4b84`, then fix `0dd4b84..aaeb482`.
 - **Final local gate:** 41 tests passed (provider 2, agents 5, execution 15, HTTP/CLI 5, migration 3, reliability 11); fmt, Clippy, build and naming passed. HTTP tests also passed after the owned-port harness correction.
@@ -252,3 +252,7 @@ Independent evidence was generated in ignored local scratch: seventeen probe gro
 | AC-9, regression | Virtual clock advances only on requested sleep. Four independently launched concurrent port-zero HTTP servers had distinct owned ports and isolated run identities. | PASS |
 
 Regression dimension remains applied to migration, persistence, receipts/artifacts, typed error propagation, Runner, budget tests and HTTP startup callers. Unchanged AC cases retain round 1 PASS. The independent tester reused the performed 41-test main gate instead of repeating the full suite. Parent browser regression additionally verified persisted COMPLETE after restart and Enter/Tab/Escape API-dialog control. This remains supplied-document completion only; no production adapter/delivery proof is asserted.
+
+### Final CI snapshot regression
+
+CI run `46047562814` observed an inactive job flag paired with a previously read running SQL snapshot. Returned to implement (T7/T9, AC-6). The detail handler now holds the job-state mutex only inside the synchronous database callback while reading and serializing the run plus flag. Reservation and job termination cannot interleave that read; no mutex spans an await. The existing completion-boundary HTTP case now repeats eight runs and retains the strict terminal-state assertion. The 41-test local gate, fmt, Clippy and build passed after this correction; focused independent verification is pending.

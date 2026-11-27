@@ -150,14 +150,18 @@ async fn detail(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let run_id = id.clone();
-    let mut value = db_call(state.clone(), move |db| {
-        Ok(serde_json::to_value(db.get(&run_id)?)?)
+    let jobs = state.jobs.clone();
+    let value = db_call(state, move |db| {
+        // Keep job termination/reservation outside this snapshot boundary.
+        // Reading the flag after SQL can pair an old running snapshot with a
+        // newly inactive job and make dashboard polling stop prematurely.
+        let jobs = jobs.lock().expect("jobs lock");
+        let mut value = serde_json::to_value(db.get(&id)?)?;
+        value["agent_active"] = json!(jobs.active.contains(&id));
+        value["agent_error"] = json!(jobs.errors.get(&id));
+        Ok(value)
     })
     .await?;
-    let jobs = state.jobs.lock().expect("jobs lock");
-    value["agent_active"] = json!(jobs.active.contains(&id));
-    value["agent_error"] = json!(jobs.errors.get(&id));
     Ok(Json(value))
 }
 

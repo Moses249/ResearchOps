@@ -154,35 +154,41 @@ fn shared_execution_api_reports_system_completion_separately_from_business_parti
     let (status, contracts) = server.json("GET", "/api/contracts", json!(null));
     assert_eq!(status, 200);
     assert!(!contracts.as_array().unwrap().is_empty());
-    let spec: Value = serde_json::from_str(include_str!("../examples/research.json")).unwrap();
-    let (_, created) = server.json("POST", "/api/runs", spec);
-    let id = created["id"].as_str().unwrap();
-    let (status, _) = server.json(
-        "POST",
-        &format!("/api/runs/{id}/execute"),
-        json!({"mode":"local","trigger":"scheduled"}),
-    );
-    assert_eq!(status, 202);
-    let mut finished = None;
-    for _ in 0..100 {
-        let (_, run) = server.json("GET", &format!("/api/runs/{id}"), json!(null));
-        if run["agent_active"] == false {
-            finished = Some(run);
-            break;
+    // Exercise the completion boundary repeatedly while polling concurrently
+    // with the background worker. Inactive must never accompany a stale running
+    // snapshot from that same worker.
+    for _ in 0..8 {
+        let spec: Value = serde_json::from_str(include_str!("../examples/research.json")).unwrap();
+        let (_, created) = server.json("POST", "/api/runs", spec);
+        let id = created["id"].as_str().unwrap();
+        let (status, _) = server.json(
+            "POST",
+            &format!("/api/runs/{id}/execute"),
+            json!({"mode":"local","trigger":"scheduled"}),
+        );
+        assert_eq!(status, 202);
+        let mut finished = None;
+        for _ in 0..100 {
+            let (_, run) = server.json("GET", &format!("/api/runs/{id}"), json!(null));
+            if run["agent_active"] == false {
+                finished = Some(run);
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
         }
-        thread::sleep(Duration::from_millis(20));
+        let run = finished.expect("background execution did not finish");
+        assert_eq!(run["execution"]["latest"]["system_status"], "completed");
+        assert_eq!(run["execution"]["business_status"], "PARTIAL");
+        assert_eq!(run["execution"]["latest"]["trigger"], "scheduled");
+        assert_eq!(run["execution"]["counts"]["readback_verified"], 3);
+        let (status, recovery) =
+            server.json("GET", &format!("/api/runs/{id}/recovery"), json!(null));
+        assert_eq!(status, 200);
+        assert!(recovery["execution"]["resume"]["sql"]
+            .as_str()
+            .unwrap()
+            .contains("?1"));
     }
-    let run = finished.expect("background execution did not finish");
-    assert_eq!(run["execution"]["latest"]["system_status"], "completed");
-    assert_eq!(run["execution"]["business_status"], "PARTIAL");
-    assert_eq!(run["execution"]["latest"]["trigger"], "scheduled");
-    assert_eq!(run["execution"]["counts"]["readback_verified"], 3);
-    let (status, recovery) = server.json("GET", &format!("/api/runs/{id}/recovery"), json!(null));
-    assert_eq!(status, 200);
-    assert!(recovery["execution"]["resume"]["sql"]
-        .as_str()
-        .unwrap()
-        .contains("?1"));
 }
 
 #[test]

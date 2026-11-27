@@ -1,4 +1,4 @@
-> **phase:** release · Design + tasks approved 2026-11-28 · owner @Moses249
+> **phase:** implement · Design + tasks approved 2026-11-28 · owner @Moses249
 
 # Feature: execution-completion-contract
 
@@ -211,7 +211,7 @@ DB 재시도 helper에는 재실행이 안전한 operation만 전달한다. Busy
 
 ## Verification
 
-- **verdict:** PASS — 2차 독립 검증에서 1차 결함 해소, AC-1–12 모두 통과.
+- **verdict:** FAIL — 최종 CI에서 AC-6 snapshot 경합을 재개했다. 이전 독립 결과는 유지하며 해당 수정 재검증 대기 중이다.
 - **Tester:** `/root/independent_qa` (새 읽기 전용 QA; 동일 독립 검증자가 증분 재검증).
 - **검증 범위:** `origin/main..0dd4b84`, 이후 수정 `0dd4b84..aaeb482`.
 - **최종 로컬 게이트:** 41개 테스트 통과 (provider 2, agents 5, execution 15, HTTP/CLI 5, migration 3, reliability 11), fmt·Clippy·build·이름 규칙 통과. HTTP 소유 포트 수정 후 통합 테스트도 통과.
@@ -276,3 +276,7 @@ DB 재시도 helper에는 재실행이 안전한 operation만 전달한다. Busy
 | AC-9, regression | 주입 시계는 요청한 sleep에서만 증가. 독립적으로 동시에 실행한 port-zero HTTP 서버 4개가 서로 다른 소유 포트와 분리된 run identity 반환. | PASS |
 
 Regression 차원은 migration·persistence·receipt/artifact·typed 오류·Runner·예산 테스트·HTTP 시작 호출자에 계속 적용했다. 변경 없는 AC는 1차 PASS를 유지한다. 독립 검증자는 전체 suite를 반복하지 않고 실제 수행된 41개 게이트를 확인했다. 주 에이전트의 브라우저 회귀도 재시작 후 기존 COMPLETE 보존과 API 창 Enter/Tab/Escape 조작을 확인했다. 완료 범위는 제공 문서이며 운영 adapter·전송 증거는 주장하지 않는다.
+
+### 최종 CI snapshot 회귀
+
+CI `46047562814`에서 비활성 job flag와 이전에 읽은 running SQL snapshot의 조합을 관측했다. implement로 되돌리고 T7/T9·AC-6을 다시 열었다. detail handler는 동기 DB callback 내부에서만 job-state mutex를 잡고 run·flag를 함께 읽어 직렬화한다. 그 사이 예약·job 종료가 끼어들 수 없고 await를 가로질러 mutex를 보유하지 않는다. 기존 HTTP 완료 경계 사례는 8회 반복하며 엄격한 종료 상태 assertion을 유지한다. 수정 후 41개 로컬 테스트와 fmt·Clippy·build가 통과했으며 독립 재검증 대기 중이다.
