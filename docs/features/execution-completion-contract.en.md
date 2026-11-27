@@ -1,4 +1,4 @@
-> **phase:** planning
+> **phase:** design · Plan approved 2026-11-27 · owner @Moses249
 
 # Feature: execution-completion-contract
 
@@ -62,7 +62,128 @@ Use a fake clock and failure injection for budgets, leases, and retries; verify 
 
 ## Design
 
-Write after Feature Plan approval. Do not finalize an implementation checklist before that checkpoint.
+### Impact — implementation read contract
+
+| Files | Change |
+| --- | --- |
+| `src/contracts.rs` (new) | Typed policy validation, limits, version/digest registry, run binding |
+| `src/checkpoints.rs` (new) | Atomic checkpoints, actual SQL readback, input fingerprints, artifacts, idempotent recovery |
+| `src/execution.rs` (replace draft) | Shared Runner, sessions, clock, budget, waiting/resume, completion evaluation, recovery JSON |
+| `src/engine.rs` | Versioned migration, atomic run/binding creation, scoped claims, persistence boundary, legacy compatibility |
+| `src/agents.rs` | Extract single-claim execution while preserving review/revision and stage history |
+| `src/provider.rs` | Remaining-budget timeout, call-boundary heartbeat integration, safe error redaction |
+| `src/web.rs`, `src/main.rs` | Shared execution/contract/recovery API and CLI; preserve bounded legacy routes |
+| `src/lib.rs`, `Cargo.toml`, `Cargo.lock` | Modules, chrono/MD5 compatibility dependencies, remove the unused `report_contract` declaration |
+| `migrations/003_execution.sql` (replace draft) | Contract, scope, session, checkpoint, receipt, artifact, and readback ledgers/constraints |
+| `web/app.js`, `web/index.html` | Shared execution route, contract selection, system/business states, gates, resume information |
+| `tests/execution_contract.rs`, `tests/migration.rs` (new) | Contracts, continuous execution, injected failures, recovery, historical compatibility |
+| `tests/reliability.rs`, `tests/agents.rs`, `tests/http.rs` | Stale writes, provider budget, background execution, new fields and legacy regression |
+| `README.md`, `docs/architecture.md` | Actual behavior, legacy semantics, recovery, and limits |
+
+### Contract and scope
+
+Execute only supported JSON policies with pinned version, profile (`research`, `model_reviewed_research`, `weekly_report`), runtime, batch size, and SQL retries. Approved defaults: 900 seconds / 20 tasks / 2 retries. Allowed ranges: runtime 1..3600 seconds, batch 1..100, retries 0..2.
+
+The registry is append-only. Verify SHA-256 integrity and required MD5 compatibility; digests do not authenticate authorship. Bind only an unstarted run after registration and separate readback. Create the run, sources/questions, and default binding atomically; never silently rebind defaults during startup or conceal a mismatch.
+
+Scope is run ID plus its first execution mode. Reject mode/contract changes after work starts; local execution cannot bypass required model review. Weekly-report proof requirements remain explicit unsupported gates without fabricating data or exposing a send operation.
+
+### Shared Runner and clock
+
+`execute(run_id, mode, trigger, clock)` is the common entry point. The clock boundary supplies UTC time, monotonic elapsed time, and waiting; tests use a fake clock. Calculate KST explicitly.
+
+1. Validate contract, mode, connection, and scope before claims. Rejected starts produce diagnostics only.
+2. Observe expired sessions, reject a live duplicate, and persist before-counts and a session lease.
+3. Recover missing receipts for committed results, then prioritize retried/expired tasks over new tasks.
+4. Process one claim with a local or Researcher/Verifier executor; connect its evidence/answer/review to atomic persistence.
+5. Commit, SELECT readback, store receipt, and record observed after-counts/last successful stage. Continue across batches.
+6. On zero claims, requery state. Wait with heartbeats for work eligible within budget while handling other eligible tasks first.
+7. Materialize and read back a Markdown artifact tied to current inputs; evaluate required SQL gates and record system/business states separately.
+8. On a concrete blocker, limit, or failure, verify persistence and preserve PARTIAL diagnostics or safe recovery JSON.
+
+Measure budget monotonically and leases in stored UTC. Initial session/task lease: 300 seconds; heartbeat target: every 30 seconds and at model-call boundaries. Bound requests by `min(existing 30 seconds, remaining budget)`. Expired tokens cannot heartbeat, write results, or finalize sessions. Record the actual timestamp with `next_eligible_after_budget` when the next eligible work falls outside budget.
+
+### Data, transactions, and idempotency
+
+| Data | Design |
+| --- | --- |
+| Contracts, bindings, execution scope | Append-only contract bodies, binding changes only before first claim, fixed run/mode fingerprint |
+| Sessions | ID, run/mode/trigger, UTC start/end, KST start/end dates, lease, elapsed duration, state/stage, measured counts, error/resume |
+| Batches | Task/delivery identity, result/source references, stable payload, hashes/count; same commit as results and queue transition |
+| Readback receipts | Hash/count/state calculated by actual SELECTs and verification time, not an asserted success flag |
+| Artifacts/readbacks | Bind body hash and input fingerprint; uniqueness covers run + input fingerprint + body hash |
+
+Fingerprint contract references, execution scope, actual source hashes, questions/results, and model-review evidence in stable order. Equal output text cannot make an artifact valid for different inputs.
+
+Read `user_version` within a transaction and apply only pending migrations. Preserve M1/M2 data and do not invent historical receipts. Diagnose legacy proof gaps; a new readback must not claim historical verification.
+
+Retry only demonstrably safe operations. Generate operation/idempotency IDs outside retry loops. Bound busy/locked backoff to two retries. After a commit or readback-response failure, locate the existing commit and repair receipts instead of rerunning the task. Do not replay integrity rejection, stale-token writes, or constraint violations.
+
+### Completion, diagnostics, and recovery
+
+System states: running/completed/failed/interrupted. Business states: IN_PROGRESS/PARTIAL/COMPLETE. Gates cover pinned contracts, scope/mode, required tasks, evidence, storage integrity/readbacks, current artifacts, required model review, and external proof. Distinguish inapplicable gates from unavailable integrations.
+
+Zero claims, batch boundaries, or LLM approval do not establish completion. Preserve legacy `status`; the UI uses new execution data for business completion. Stop codes describe observations: completed required work, evidence gaps, exhausted retries/budget, next eligibility after budget, unavailable provider, contract mismatch, storage/integrity failure, or expired session lease.
+
+Preserve every AC-8 diagnostic field. Keep SQL and bindings separate. Export only allowlisted fields and redact keys, Authorization, and private settings. Atomically create a new recovery JSON beside the DB under `recovery/`, within the default Git-ignore boundary. If the file write also fails, return the failure and sanitized diagnostics rather than asserting storage.
+
+### Interfaces and compatibility
+
+| Interface | Behavior |
+| --- | --- |
+| `POST /api/contracts` | Register and read back supported version/body/digest |
+| `POST /api/runs/{id}/contract` | Validate a pre-execution binding |
+| `POST /api/runs/{id}/execute` | Accept mode/trigger and start the background Runner; acceptance is not completion |
+| `GET /api/runs/{id}` | Add execution state, business state, counts, gates, and resume data without removing existing fields |
+| `GET /api/recovery` | Scoped unfinished-run/session diagnostics; never implicitly execute another run |
+| `GET /api/runs/{id}/recovery` | Sanitized recovery information/JSON |
+| CLI `execute`, `contracts import`, `contract bind`, `recovery` | Same validation, Runner, and output model as HTTP |
+
+Keep `/work`, `/agents`, and CLI `work` as bounded low-level compatibility routes with contract/scope guards. Their termination alone does not grant business COMPLETE. Dashboard Create/Resume/Retry uses `/execute`. Scheduled triggers share the Runner contract without installing cron or another automation.
+
+### Draft reconciliation
+
+Reuse policy/hash/KST ideas after validation, and complete append-only ledger constraints. Make creation/binding atomic; remove implicit startup default binding. Replace receipt-count-only completion with actual payload/current-input/proof checks. Include input fingerprints in artifact identity. Remove unused `report_contract`. Implement the shared Runner separately from legacy bounded wrappers.
+
+### AC mapping and test strategy
+
+| AC | Design | Main verification |
+| --- | --- | --- |
+| AC-1 | Registry/binding/preflight | Mismatch yields zero claims/model calls |
+| AC-2 | Runner/batch continuation | One session processes and reads back 3 tasks at batch size 1 |
+| AC-3 | Scope/recovery priority/fencing | Recovery order, other-run isolation, concurrent stale writes |
+| AC-4 | Atomic batch/append-only/readback | Rollback, tampering, rejected UPDATE/DELETE, matching hashes/counts/state |
+| AC-5 | Wait classification/fake clock | No false completion, other eligible work, delayed continuation |
+| AC-6 | Completion/current artifact | System completed with business PARTIAL, model gate, input changes |
+| AC-7 | Safe SQL retries/commit lookup | Two retries, non-transient rejection, post-commit interruption |
+| AC-8 | Durable diagnostics/recovery JSON | Measured counts, stage, SQL/bindings, DB/file failure, redaction |
+| AC-9 | Monotonic budget/UTC leases | Boundaries, actual elapsed time, valid stop codes, unknown interruption cause |
+| AC-10 | Shared triggers/DB recovery | Equivalent triggers, restart, missing credentials |
+| AC-11 | Versioned migrations/legacy | Preserve v1/v2, no invented receipts, reject stale artifacts |
+| AC-12 | External-proof gates/safe UI/API | No external calls, fixture limits, no secret leakage, keyboard/text access |
+
+Use real SQLite, injected failures, fake clocks, and mock providers. Run baseline regressions, fmt, and Clippy, then fresh read-only QA for every AC. Screenshots do not establish database or delivery proof.
+
+### Proposed task decomposition
+
+The design checkpoint approves this proposal. The live checklist is added to issue #2 after approval.
+
+| Task | Work | AC |
+| --- | --- | --- |
+| T1 | Registry, typed validation, atomic run binding, fixed scope | AC-1, AC-3, AC-12 |
+| T2 | Versioned migrations, ledger/receipt constraints, legacy diagnostics | AC-4, AC-11 |
+| T3 | Atomic checkpoints, separate readback, input/artifact fingerprints | AC-4, AC-6, AC-7, AC-11 |
+| T4 | Sessions, clock, heartbeat, continuous loop, waiting/budget/triggers | AC-2, AC-3, AC-5, AC-9, AC-10 |
+| T5 | Local/model executors, timeouts, safe SQL retries | AC-1, AC-3, AC-7, AC-9 |
+| T6 | Business gates, partial outcomes, safe DB/file recovery diagnostics | AC-6, AC-8, AC-10, AC-12 |
+| T7 | API/CLI and legacy compatibility | AC-1, AC-6, AC-8, AC-10, AC-11 |
+| T8 | UI contracts, system/business state, gates, resume/accessibility | AC-6, AC-8, AC-12 |
+| T9 | Failure/time/restart/concurrency/compatibility tests and docs | AC-1–AC-12 |
+| T10 | Fresh read-only QA, defect regression, Draft PR evidence | AC-1–AC-12 |
+
+### Risks and alternatives
+
+Use a new execution route instead of changing bounded legacy semantics; test that the UI actually migrates. Enforce single-host SQLite session ownership in SQL rather than relying on in-memory jobs. Restrict SQL retries to safe operations to avoid post-commit duplication. Test budgets and leases during model calls. Validate constraints and migrations against v1/v2 fixtures and copies, never production databases. Limit new dependencies to chrono and legacy-compatible MD5; retain sha2. Do not introduce a general workflow framework, queue service, or HTML parser.
 
 ## Verification
 

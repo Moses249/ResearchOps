@@ -1,4 +1,4 @@
-> **phase:** planning
+> **phase:** design · Plan approved 2026-11-27 · owner @Moses249
 
 # Feature: execution-completion-contract
 
@@ -71,7 +71,143 @@
 
 ## Design
 
-Feature Plan 승인 후 작성한다. 승인 전 구현 작업 체크리스트는 확정하지 않는다.
+### Impact — implementation read contract
+
+| 파일 | 변경 |
+| --- | --- |
+| `src/contracts.rs` (신규) | 지원 정책 타입·한도 검증·버전/digest registry·run binding |
+| `src/checkpoints.rs` (신규) | 원자 checkpoint·실제 SQL readback·입력 fingerprint·Artifact·멱등 복구 |
+| `src/execution.rs` (초안 교체) | 공통 Runner·실행 세션·clock·budget·대기/재개·완료 평가·복구 JSON |
+| `src/engine.rs` | 버전별 migration·run 생성/계약 binding 원자화·scoped claim·결과 저장 경계·legacy 호환 |
+| `src/agents.rs` | 기존 루프에서 단일 claim 처리 분리; 모델 검증/revision 루프와 단계 이력 유지 |
+| `src/provider.rs` | 남은 예산을 반영한 timeout, 호출 전후 heartbeat 연결, 안전한 오류 redaction |
+| `src/web.rs`, `src/main.rs` | 공통 실행·계약·복구 조회 API/CLI; legacy bounded 경로 유지 |
+| `src/lib.rs`, `Cargo.toml`, `Cargo.lock` | 모듈 등록; chrono·MD5 호환성 의존성; 잘못 남은 `report_contract` 선언 제거 |
+| `migrations/003_execution.sql` (초안 교체) | 계약·scope·세션·checkpoint·receipt·Artifact·readback 원장과 제약 |
+| `web/app.js`, `web/index.html` | 새 실행 경로·계약 선택·업무/시스템 상태·Gate·재개 정보 표시 |
+| `tests/execution_contract.rs`, `tests/migration.rs` (신규) | 계약·연속 실행·오류 주입·복구·구버전 호환 검증 |
+| `tests/reliability.rs`, `tests/agents.rs`, `tests/http.rs` | stale write·모델 예산·백그라운드 실행·새 응답/legacy 회귀 |
+| `README.md`, `docs/architecture.md` | 실제 새 동작·legacy 의미·복구·한도를 반영 |
+
+### Contract and scope
+
+- 지원 JSON 정책만 실행한다. 버전, profile (`research`, `model_reviewed_research`, `weekly_report`), runtime, batch size, SQL retry count를 고정한다. 기본값은 승인된 900초·20건·2회, 허용 범위는 runtime 1..3600초·batch 1..100·SQL retry 0..2다.
+- Registry는 append-only다. SHA-256 무결성과 필요한 MD5 호환 digest를 확인하며, digest는 신뢰 주체 인증이 아니다. 계약 등록과 별도 SELECT 검증 후에만 미시작 run에 binding할 수 있다.
+- run 생성, 소스/질문 저장, 기본 계약 binding을 한 트랜잭션으로 처리한다. 시작 때 기본 계약을 몰래 다시 binding하거나 기존 digest 불일치를 덮어쓰지 않는다.
+- 실행 scope는 run ID와 최초 실행 mode다. 작업 시작 후 mode나 계약 변경은 거절한다. 모델 검증을 요구하는 계약은 local mode로 우회할 수 없다.
+- `weekly_report`의 외부 proof 요구는 명시적 미지원 Gate로 반환한다. 이 기능에서 해당 데이터를 만들어 넣거나 발송 함수를 노출하지 않는다.
+
+### Shared Runner and clock
+
+`execute(run_id, mode, trigger, clock)`는 모든 trigger의 진입점이다. `Clock` 경계는 UTC 시각·단조 경과 시간·대기를 제공하며, 테스트에서는 가짜 clock으로 시간 경과를 제어한다. KST 날짜는 UTC에서 명시적으로 계산한다.
+
+1. 계약·mode·연결·scope를 검사한다. 거절된 시작은 진단 정보만 남기며 작업을 claim하지 않는다.
+2. 만료 세션을 관측·기록하고, live session이 있으면 중복 Runner를 거절한다. before counts와 session lease를 저장한다.
+3. 이미 커밋된 결과의 누락 receipt를 우선 복구한다. 그다음 재시도/만료 작업을 새 작업보다 우선 claim한다.
+4. local executor 또는 Researcher/Verifier executor로 claim 하나를 처리한다. 원문/답변/모델 승인은 결과 원자 저장 경계에 연결한다.
+5. 커밋 → 별도 SQL readback → receipt 저장 → 재조회된 after counts/마지막 성공 단계 기록을 수행한다. 다음 묶음을 반복한다.
+6. claim이 없으면 상태를 다시 읽는다. 예산 안에 도래하는 retry/lease는 heartbeat를 유지하며 기다리고, 다른 eligible 작업은 먼저 처리한다.
+7. 작업 범위가 종료되면 현재 입력 fingerprint에 맞는 Markdown Artifact를 저장·재조회한다. 필수 Gate를 실제 SQL로 평가해 session과 업무 상태를 별도로 기록한다.
+8. 구체적 blocker·한도·실패가 발생하면 저장 여부를 확인하고 PARTIAL 기록 또는 안전한 복구 JSON을 남긴다.
+
+budget은 단조 시간으로 측정하고 lease는 저장된 UTC로 판정한다. 초기 session/task lease는 300초, heartbeat 목표 간격은 30초이며 모델 호출 전후에도 갱신한다. 모델 요청 timeout은 `min(기존 30초, 남은 예산)`으로 줄인다. 이미 만료된 token은 heartbeat·결과·종료 쓰기 모두 거절한다. 알려진 다음 처리 시점이 예산을 넘으면 `next_eligible_after_budget`와 실제 timestamp를 기록한다.
+
+### Data, transactions, and idempotency
+
+| 데이터 | 구현 기준 |
+| --- | --- |
+| `execution_contracts`, `run_contracts`, 실행 scope | append-only 계약 원문; binding은 첫 claim 전에만 변경 가능; run/mode fingerprint 고정 |
+| `execution_sessions` | session ID, run/mode/trigger, UTC 시작·종료, KST 시작·종료일, lease, 단조 경과 값, 상태, stage, 전후 수량, 오류·resume |
+| `execution_batches` | task ID·delivery token·결과/원본 참조·안정된 payload·hash·count; result/queue와 같은 commit |
+| `batch_readbacks` | 실제 SELECT로 계산한 hash/count/state와 확인 시각; 단순 '성공' flag로 대체 금지 |
+| `report_artifacts`, `artifact_readbacks` | body hash와 입력 fingerprint에 모두 연결; unique key는 run+input fingerprint+body hash |
+
+입력 fingerprint에는 계약 참조·실행 scope·실제 소스 hash·질문/작업 결과·모델 검증 증거를 안정된 정렬로 포함한다. 과거 Artifact가 같은 본문을 가졌다는 이유만으로 최신 입력을 충족하지 않게 한다.
+
+SQLite `user_version`을 트랜잭션 안에서 읽고 필요한 migration만 순서대로 적용한다. 기존 M1/M2 결과를 삭제하거나 과거 receipt를 가공하지 않는다. 예전 결과는 legacy proof 부족을 표시하며, 확인 가능한 현재 readback을 수행할 때도 과거에 검증됐다고 기록하지 않는다.
+
+DB 재시도 helper에는 재실행이 안전한 operation만 전달한다. Busy/locked는 제한 backoff로 최대 2회 재시도한다. operation ID·멱등 key는 재시도 밖에서 생성한다. 커밋 뒤 응답/readback 실패는 같은 작업을 새로 실행하지 않고 SQL로 기존 commit을 찾아 receipt만 복구한다. 검증 실패·오래된 token·제약 위반에는 자동 SQL replay를 하지 않는다.
+
+### Completion, diagnostics, and recovery
+
+- `system_status`: running/completed/failed/interrupted. `business_status`: IN_PROGRESS/PARTIAL/COMPLETE.
+- Gate 목록: pinned contract, scope/mode, required tasks, evidence, storage integrity/readbacks, current Artifact, 계약상 모델 검증, 외부 필수 proof. 해당 없는 Gate와 미연결 Gate를 구분한다.
+- claim 0건·batch 경계·LLM approval은 완료 근거가 아니다. legacy `status`는 유지하되 UI의 업무 판정은 새 `execution` 정보를 사용한다.
+- stop code는 `required_work_complete`, `evidence_gaps`, `retry_limit_reached`, `execution_budget_exhausted`, `next_eligible_after_budget`, `provider_unavailable`, `contract_mismatch`, `storage_failure`, `integrity_failure`, `session_lease_expired` 등 관측 사실을 설명한다.
+- PARTIAL은 모든 AC-8 필드를 구조화하여 저장한다. resume SQL과 값은 분리하고 사용자 텍스트를 SQL 문자열에 끼워 넣지 않는다.
+- 실패 정보는 허용 필드만 출력하며 API 키·Authorization·비공개 설정을 제거한다. 복구 JSON은 DB 옆 `recovery/`의 새 파일로 원자 저장하고 기본 Git ignore 범위에 포함한다. 파일 저장도 실패하면 저장 불가 사실과 민감 정보를 뺀 진단을 호출자에게 반환한다.
+
+### Interfaces and compatibility
+
+| 경로 | 동작 |
+| --- | --- |
+| `POST /api/contracts` | 지원 정책의 version/body/digest를 등록·재조회 |
+| `POST /api/runs/{id}/contract` | 실행 전 계약 binding 검증 |
+| `POST /api/runs/{id}/execute` | mode·trigger를 받아 background Runner 시작; 수락과 완료를 구분 |
+| `GET /api/runs/{id}` | 기존 응답 + `execution`의 system/business 상태·counts·Gate·resume |
+| `GET /api/recovery` | 선택 조건에 맞는 미완료 session/run의 진단 목록; 다른 run을 자동 실행하지 않음 |
+| `GET /api/runs/{id}/recovery` | 안전한 복구 정보/JSON; 키·수신자 설정 제외 |
+| CLI `execute`, `contracts import`, `contract bind`, `recovery` | HTTP와 동일한 검증·Runner·출력 모델 사용 |
+
+기존 `/work`, `/agents`, CLI `work`의 bounded 동작은 호환용 low-level 경로로 유지한다. 계약/scope 검사는 적용하되 이 경로 종료만으로 business COMPLETE를 부여하지 않는다. UI의 Create & run / Resume / Retry는 새 `/execute`를 사용한다. scheduled trigger는 공통 Runner 호출 계약만 제공하며 cron이나 자동화는 설치하지 않는다.
+
+### Existing draft reconciliation
+
+| 초안 요소 | 결정 |
+| --- | --- |
+| 계약 타입·hash·KST 함수 | 지원 정책과 한도를 명확히 하여 재사용 |
+| append-only table/trigger | 전체 ledger/readback 누락을 보완하여 채택 |
+| `create()` 후 별도 기본 binding | 원자성 문제를 고쳐 같은 생성 transaction에 통합 |
+| `begin_execution()`의 자동 기본 binding | 불일치·누락 은폐를 막도록 제거; legacy는 별도 진단 |
+| receipt count만으로 완료 평가 | 실제 payload/현재 입력/검증 결과를 검사하도록 교체 |
+| body hash만의 Artifact unique key | 입력 fingerprint를 포함하도록 수정 |
+| 미연결 `report_contract` module 선언 | 제거; 이 기능의 범위는 외부 Gate 차단까지 |
+| 기존 worker의 limit 종료 루프 | shared Runner를 새로 구현하고 legacy wrapper와 구분 |
+
+### AC → design mapping and verification strategy
+
+| AC | 설계 항목 | 주요 검증 |
+| --- | --- | --- |
+| AC-1 | Contract registry/binding, preflight | digest·정책·mode 불일치 시 claim/model 호출 0회 |
+| AC-2 | Shared Runner, batch 반복 | batch 1·task 3에서 한 session의 처리·readback 3개 |
+| AC-3 | scope 고정, 회복 우선 claim, fencing | 복구 우선순위·다른 run 불변·동시/stale write |
+| AC-4 | 원자 batch와 append-only/readback | rollback·변조·UPDATE/DELETE 거절·hash/count/state 일치 |
+| AC-5 | 대기 분류와 fake clock | 빈 claim에 COMPLETE 금지·다른 eligible 처리·지연 작업 재개 |
+| AC-6 | Completion evaluator, 현재 Artifact | system completed/business PARTIAL·모델 검증 Gate·입력 변경 |
+| AC-7 | idempotent SQL helper, commit 조회 복구 | busy/locked 2회 한도·비일시 오류 미재시도·commit 후 crash |
+| AC-8 | durable diagnostics·recovery JSON | 전후 실측·stage·SQL/params·DB/파일 동시 실패·redaction |
+| AC-9 | monotonic budget·UTC lease | 경계값·실측 elapsed·허용 stop code·원인 미확인 |
+| AC-10 | trigger 공통 경로, DB recovery 조회 | 세 trigger 결과 대조·재시작·자격 증명 부재 |
+| AC-11 | versioned migrations, legacy 상태 | v1/v2 DB 보존·가짜 receipt 금지·오래된 Artifact 무효 |
+| AC-12 | unsupported proof Gate, 안전한 UI/API | 외부 호출 0회·fixture 제한·비밀 비노출·키보드/텍스트 확인 |
+
+실제 SQLite와 오류 주입, 가짜 clock, 모의 provider로 검증한다. baseline 회귀 테스트·fmt·Clippy를 실행한 뒤 fresh read-only QA가 AC별 증거를 검토한다. 스크린샷만으로 DB Gate나 실제 전달을 검증했다고 표시하지 않는다.
+
+### Proposed task decomposition
+
+아래는 승인 대상 작업 분해이며 live 완료 상태는 이슈 #2에서 관리한다. Design 승인 뒤 체크리스트로 반영한다.
+
+| Task | 작업 | AC |
+| --- | --- | --- |
+| T1 | 계약 registry·정책 검증·원자 run binding·scope 고정 | AC-1, AC-3, AC-12 |
+| T2 | 버전별 migration·ledger/receipt 제약·legacy 진단 | AC-4, AC-11 |
+| T3 | 원자 결과/checkpoint·별도 readback·현재 입력/Artifact fingerprint | AC-4, AC-6, AC-7, AC-11 |
+| T4 | session·clock·heartbeat·지속 loop·대기/예산/trigger | AC-2, AC-3, AC-5, AC-9, AC-10 |
+| T5 | local/model executor 통합·timeout·멱등 SQL retry | AC-1, AC-3, AC-7, AC-9 |
+| T6 | 업무 Gate·부분 결과·안전한 DB/파일 복구 정보 | AC-6, AC-8, AC-10, AC-12 |
+| T7 | API/CLI와 legacy 호환 경로 연결 | AC-1, AC-6, AC-8, AC-10, AC-11 |
+| T8 | UI 계약·system/business 상태·Gate·resume·접근성 | AC-6, AC-8, AC-12 |
+| T9 | 오류/시간/재시작/동시성/호환 테스트·사용 문서 | AC-1~AC-12 |
+| T10 | fresh read-only QA·결함 회귀·Draft PR 증거 정리 | AC-1~AC-12 |
+
+### Risks and alternatives
+
+- 기존 bounded endpoint의 의미를 바꾸는 대신 새 실행 경로를 선택해 호환성 위험을 줄인다. UI가 legacy를 계속 호출하는 회귀는 통합 테스트로 막는다.
+- SQLite 단일 호스트 범위에서 lease/session 중복 실행을 SQL로 막는다. 메모리 job 목록만으로 소유권을 판단하지 않는다.
+- DB retry는 전체 callback 자동 재호출 대신 허용 operation으로 제한한다. commit 이후 부작용 중복이 핵심 위험이다.
+- 모델 요청 중 예산·lease가 소진될 수 있으므로 호출 경계 timeout과 heartbeat를 실제 clock 테스트로 검증한다.
+- 과거 원본의 제약 추가와 migration 실패는 실제 v1/v2 fixture·백업 복사본으로 검증한다. 운영 DB를 직접 시험하지 않는다.
+- 새 라이브러리는 초안의 chrono(UTC/KST)와 md5(레거시 호환) 범위로 제한한다. SHA-256은 기존 sha2를 사용한다. 범용 workflow framework·새 큐·HTML parser는 도입하지 않는다.
 
 ## Verification
 
