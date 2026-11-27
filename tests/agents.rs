@@ -11,7 +11,7 @@ use researchops::{
 };
 use serde_json::{json, Value};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex,
 };
 
@@ -262,8 +262,22 @@ async fn shared_runner_records_model_proof_and_prevents_local_bypass() {
 async fn model_backoff_respects_the_remaining_execution_budget() {
     use researchops::{
         contracts::{md5_digest, Binding, ContractImport, Mode, Trigger},
-        execution::{execute, SystemClock},
+        execution::{execute, Clock},
     };
+    #[derive(Clone)]
+    struct BackoffClock(Arc<AtomicU64>, i64);
+    impl Clock for BackoffClock {
+        fn now(&self) -> i64 {
+            self.1 + self.0.load(Ordering::SeqCst) as i64 / 1000
+        }
+        fn elapsed(&self) -> std::time::Duration {
+            std::time::Duration::from_millis(self.0.load(Ordering::SeqCst))
+        }
+        async fn sleep(&self, duration: std::time::Duration) {
+            self.0
+                .fetch_add(duration.as_millis() as u64, Ordering::SeqCst);
+        }
+    }
     let (dir, id, mut provider, state, handle) = setup(true, false).await;
     provider.tested = true;
     let body=json!({"profile":"model_reviewed_research","max_runtime_seconds":1,"batch_size":1,"sql_retries":2}).to_string();
@@ -292,7 +306,13 @@ async fn model_backoff_respects_the_remaining_execution_budget() {
         Mode::Agents,
         Trigger::Manual,
         Some(provider),
-        SystemClock::default(),
+        BackoffClock(
+            Arc::new(AtomicU64::new(0)),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+        ),
     )
     .await
     .unwrap();

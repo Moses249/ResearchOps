@@ -120,10 +120,10 @@ impl Engine {
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 3 {
+        if version > 4 {
             bail!("database schema is newer than this application");
         }
-        if version < 3 {
+        if version < 4 {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let current: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
             if current < 1 {
@@ -151,6 +151,9 @@ impl Engine {
                     }
                 }
             }
+            if current < 4 {
+                tx.execute_batch(include_str!("../migrations/004_ledger_guards.sql"))?;
+            }
             tx.commit()?;
         }
         Ok(Self { conn })
@@ -171,7 +174,7 @@ impl Engine {
             )?;
         }
         for source in spec.sources {
-            tx.execute("INSERT OR IGNORE INTO sources(id,run_id,title,uri,content,content_hash) VALUES(?1,?2,?3,?4,?5,?6)",
+            tx.execute("INSERT INTO sources(id,run_id,title,uri,content,content_hash) SELECT ?1,?2,?3,?4,?5,?6 WHERE NOT EXISTS(SELECT 1 FROM sources WHERE run_id=?2 AND content_hash=?6)",
                 params![Uuid::new_v4().to_string(),id,source.title.trim(),source.uri,source.content,hash(&source.content)])?;
         }
         crate::contracts::bind_default(&tx, &id)?;
@@ -415,7 +418,7 @@ impl Engine {
             {
                 bail!("evidence does not match the stored source snapshot");
             }
-            tx.execute("INSERT OR IGNORE INTO findings(task_id,source_id,quote,score,verification) VALUES(?1,?2,?3,?4,'exact_quote')",params![claim.task_id,finding.source_id,finding.quote,finding.score])?;
+            tx.execute("INSERT INTO findings(task_id,source_id,quote,score,verification) SELECT ?1,?2,?3,?4,'exact_quote' WHERE NOT EXISTS(SELECT 1 FROM findings WHERE task_id=?1 AND source_id=?2 AND quote=?3)",params![claim.task_id,finding.source_id,finding.quote,finding.score])?;
         }
         if let Some(answer) = answer {
             let approved:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM agent_events WHERE task_id=?1 AND lease_token=?2 AND role='verifier' AND status='approved')",params![claim.task_id,claim.token],|r|r.get(0))?;
@@ -430,9 +433,11 @@ impl Engine {
         }
         crate::checkpoints::append_checkpoint(&tx, claim, at)?;
         tx.commit()?;
-        let retries = self.checked_policy(&claim.run_id)?.sql_retries;
-        crate::execution::sql_retry(retries, || self.verify_checkpoint(&claim.task_id))?;
-        Ok(())
+        (|| {
+            let retries = self.checked_policy(&claim.run_id)?.sql_retries;
+            crate::execution::sql_retry(retries, || self.verify_checkpoint(&claim.task_id))
+        })()
+        .context(crate::execution::CheckpointReadbackFailure)
     }
 
     pub fn fail(&mut self, claim: &Claim, message: &str, at: i64) -> Result<()> {

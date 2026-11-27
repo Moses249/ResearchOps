@@ -415,6 +415,15 @@ impl std::fmt::Display for BudgetExceeded {
 }
 impl std::error::Error for BudgetExceeded {}
 
+#[derive(Debug)]
+pub(crate) struct CheckpointReadbackFailure;
+impl std::fmt::Display for CheckpointReadbackFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("checkpoint committed; post-commit readback failed")
+    }
+}
+impl std::error::Error for CheckpointReadbackFailure {}
+
 #[derive(Clone)]
 pub(crate) struct Control<C: Clock> {
     pub path: PathBuf,
@@ -705,6 +714,10 @@ async fn run_loop<C: Clock>(
                     .await
             };
             if let Err(error) = result {
+                if error.is::<CheckpointReadbackFailure>() {
+                    *stage = "checkpoint_readback".into();
+                    c.success("checkpoint_commit").await?;
+                }
                 if error.is::<BudgetExceeded>() {
                     let task = claim.clone();
                     let at = c.clock.now();

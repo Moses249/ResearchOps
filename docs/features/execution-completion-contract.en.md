@@ -1,4 +1,4 @@
-> **phase:** test · Design + tasks approved 2026-11-28 · owner @Moses249
+> **phase:** implement · Design + tasks approved 2026-11-28 · owner @Moses249
 
 # Feature: execution-completion-contract
 
@@ -193,4 +193,12 @@ Use a new execution route instead of changing bounded legacy semantics; test tha
 
 Browser verification exercised contract selection, shared execution, textual states, recovery candidates and parameterized resume SQL. A three-question fixture produced system `completed`, business `PARTIAL`, three readbacks and an evidence gap. A fully supported one-question run produced system `completed`, business `COMPLETE`, one readback and no gates. A separate JavaScript failure injection confirmed a rejected contract binding never starts execution.
 
-Independent AC-specific verification is pending. These implementation checks do not establish production completion.
+### Independent QA round 1
+
+- **Tester:** `/root/independent_qa` (fresh read-only agent).
+- **Reviewed head:** `0dd4b84`.
+- **verdict:** FAIL (AC-4, AC-8); AC-1–3, AC-5–7, AC-9–12 passed the independent cases.
+- Direct findings UPDATE was accepted; SQLite REPLACE could bypass DELETE guards with recursive triggers off; a committed checkpoint followed by a receipt failure reported the task-processing stage instead of checkpoint readback.
+- Returned to implement; T2, T6 and T9 reopened. Fix scope: v4 immutable-ledger collision/observation guards, v3 upgrade preservation, safe idempotent insert callsites and typed post-commit stage diagnostics. Windows CI additionally exposed a wall-clock-dependent one-second budget test, replaced with an injected clock.
+
+Independent re-verification is required for this incremental fix. Implementation and mock evidence do not establish production completion.

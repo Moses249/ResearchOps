@@ -34,7 +34,7 @@ CREATE UNIQUE INDEX execution_live_run ON execution_sessions(run_id) WHERE syste
 CREATE INDEX execution_run ON execution_sessions(run_id,started_at);
 CREATE TRIGGER run_contract_binding_frozen BEFORE UPDATE ON run_contracts
 WHEN (OLD.mode IS NOT NULL OR EXISTS(SELECT 1 FROM tasks WHERE run_id=OLD.run_id AND attempts>0) OR EXISTS(SELECT 1 FROM execution_sessions WHERE run_id=OLD.run_id))
-AND NOT(OLD.mode IS NULL AND NEW.mode IN ('local','agents') AND NEW.version=OLD.version AND NEW.expected_sha256=OLD.expected_sha256 AND NEW.expected_md5=OLD.expected_md5)
+AND NOT(OLD.mode IS NULL AND NEW.run_id=OLD.run_id AND NEW.mode IN ('local','agents') AND NEW.version=OLD.version AND NEW.expected_sha256=OLD.expected_sha256 AND NEW.expected_md5=OLD.expected_md5)
 BEGIN SELECT RAISE(ABORT,'run contract and mode are pinned'); END;
 CREATE TRIGGER run_contract_no_delete BEFORE DELETE ON run_contracts
 BEGIN SELECT RAISE(ABORT,'run contract binding cannot be deleted'); END;

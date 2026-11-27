@@ -1,4 +1,4 @@
-> **phase:** test · Design + tasks approved 2026-11-28 · owner @Moses249
+> **phase:** implement · Design + tasks approved 2026-11-28 · owner @Moses249
 
 # Feature: execution-completion-contract
 
@@ -217,4 +217,12 @@ DB 재시도 helper에는 재실행이 안전한 operation만 전달한다. Busy
 
 브라우저에서 계약 선택, 공통 실행, 텍스트 상태, 복구 후보와 매개변수 SQL을 확인했다. 질문 3개 fixture는 system `completed`, business `PARTIAL`, readback 3개와 근거 누락을 표시했다. 근거가 충족된 질문 1개 실행은 system `completed`, business `COMPLETE`, readback 1개와 열린 게이트 없음으로 표시했다. 별도 JavaScript 실패 주입으로 계약 연결이 거부되면 실행하지 않는 것을 확인했다.
 
-독립 QA의 AC별 검증은 아직 대기 중이다. 위 구현 검사는 운영 업무 완료의 증거가 아니다.
+### 독립 QA 1차
+
+- **Tester:** `/root/independent_qa` (새 읽기 전용 에이전트).
+- **검증 head:** `0dd4b84`.
+- **verdict:** FAIL (AC-4, AC-8); AC-1–3, AC-5–7, AC-9–12의 독립 검증 사례는 통과.
+- findings 직접 UPDATE 허용, recursive trigger가 꺼진 SQLite에서 REPLACE의 DELETE 보호 우회, checkpoint commit 이후 receipt 실패를 task-processing 단계로 오기하는 결함을 재현했다.
+- implement로 되돌리고 T2·T6·T9를 다시 열었다. 수정 범위는 v4 원장 충돌·관측 보호, v3 업그레이드 보존, 멱등 insert 호출, commit 이후의 typed 단계 진단이다. Windows CI에서 드러난 1초 예산 테스트의 실제 시간 의존성도 주입 시계로 바꿨다.
+
+증분 수정에 대한 독립 재검증이 필요하다. 위 구현·mock 증거는 운영 업무 완료의 증거가 아니다.

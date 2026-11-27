@@ -190,6 +190,37 @@ async fn committed_result_without_receipt_recovers_without_redelivery() {
 }
 
 #[tokio::test]
+async fn persistent_post_commit_receipt_failure_records_the_exact_stage() {
+    let (dir, engine, id) = setup();
+    drop(engine);
+    let conn = rusqlite::Connection::open(dir.path().join("test.db")).unwrap();
+    conn.execute_batch("CREATE TRIGGER injected_receipt_failure BEFORE INSERT ON batch_readbacks BEGIN SELECT RAISE(ABORT,'injected post-commit receipt failure'); END;").unwrap();
+    let result = execution::execute(
+        dir.path().join("test.db"),
+        id,
+        Mode::Local,
+        Trigger::Manual,
+        None,
+        SystemClock::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.business_status, "PARTIAL");
+    assert_eq!(result.failure_stage.as_deref(), Some("checkpoint_readback"));
+    assert_eq!(
+        result.last_successful_stage.as_deref(),
+        Some("checkpoint_commit")
+    );
+    assert!(result
+        .error
+        .unwrap()
+        .contains("injected post-commit receipt failure"));
+    let counts = result.after.unwrap();
+    assert_eq!(counts.succeeded, 1);
+    assert_eq!(counts.readback_verified, 0);
+}
+
+#[tokio::test]
 async fn zero_claim_waits_for_a_lease_and_never_means_complete() {
     let (dir, mut engine, id) = setup();
     let clock = FakeClock::new();

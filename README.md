@@ -62,7 +62,7 @@ The Runner prioritizes missing readbacks and expired/retried work in the selecte
 
 The dashboard's **Recovery** view lists unfinished runs without executing them. **Recovery JSON** includes SQL and separate binding values, observed counts, stages, stop reasons, and next eligible time. Database failure preserves a new JSON file under the database's sibling `recovery/` directory. Unknown counts stay null; last-observed counts are distinguished from confirmed end counts. If both DB and file storage fail, the caller receives explicit failure diagnostics. Recovery files are excluded from Git. The API shows up to 100 local recovery files.
 
-Schema v1/v2 migration preserves existing results without inventing historical contracts or readbacks. Such legacy results remain queryable but cannot establish business COMPLETE. Start a new run to use a pinned contract; an unstarted legacy run may be explicitly bound. Back up valuable databases before upgrading.
+Schema v1/v2 migration preserves existing results without inventing historical contracts or readbacks. Such legacy results remain queryable but cannot establish business COMPLETE. Start a new run to use a pinned contract; an unstarted legacy run may be explicitly bound. Schema v4 also upgrades existing v3 databases with observation-ledger and replacement-collision guards. Idempotent recovery selects existing identities and verifies their contents instead of replacing immutable rows. Back up valuable databases before upgrading.
 
 ## API connection and agent mode
 

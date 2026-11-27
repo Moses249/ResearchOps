@@ -75,7 +75,7 @@ impl Engine {
         {
             bail!("checkpoint readback mismatch");
         }
-        self.conn.execute("INSERT OR IGNORE INTO batch_readbacks(batch_id,sha256,findings_count,task_status,checked_at) VALUES(?1,?2,?3,?4,?5)",params![id,sha,count,observed["status"].as_str(),crate::engine::now()])?;
+        self.conn.execute("INSERT INTO batch_readbacks(batch_id,sha256,findings_count,task_status,checked_at) SELECT ?1,?2,?3,?4,?5 WHERE NOT EXISTS(SELECT 1 FROM batch_readbacks WHERE batch_id=?1)",params![id,sha,count,observed["status"].as_str(),crate::engine::now()])?;
         let valid:bool=self.conn.query_row("SELECT sha256=?2 AND findings_count=?3 AND task_status='succeeded' FROM batch_readbacks WHERE batch_id=?1",params![id,sha,count],|r|r.get(0))?;
         if !valid {
             bail!("stored readback receipt mismatch");
@@ -150,7 +150,7 @@ impl Engine {
         let body = self.report(run_id)?;
         let input = self.input_fingerprint(run_id)?;
         let digest = hash(&body);
-        self.conn.execute("INSERT OR IGNORE INTO report_artifacts(id,run_id,body,sha256,input_sha256,created_at) VALUES(?1,?2,?3,?4,?5,?6)",params![Uuid::new_v4().to_string(),run_id,body,digest,input,crate::engine::now()])?;
+        self.conn.execute("INSERT INTO report_artifacts(id,run_id,body,sha256,input_sha256,created_at) SELECT ?1,?2,?3,?4,?5,?6 WHERE NOT EXISTS(SELECT 1 FROM report_artifacts WHERE run_id=?2 AND input_sha256=?5 AND sha256=?4)",params![Uuid::new_v4().to_string(),run_id,body,digest,input,crate::engine::now()])?;
         let (id,observed,sha,fingerprint):(String,String,String,String)=self.conn.query_row("SELECT id,body,sha256,input_sha256 FROM report_artifacts WHERE run_id=?1 AND input_sha256=?2 AND sha256=?3",params![run_id,input,digest],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
         if observed != body
             || hash(&observed) != sha
@@ -158,7 +158,7 @@ impl Engine {
         {
             bail!("report readback mismatch");
         }
-        self.conn.execute("INSERT OR IGNORE INTO artifact_readbacks(artifact_id,sha256,input_sha256,checked_at) VALUES(?1,?2,?3,?4)",params![id,sha,fingerprint,crate::engine::now()])?;
+        self.conn.execute("INSERT INTO artifact_readbacks(artifact_id,sha256,input_sha256,checked_at) SELECT ?1,?2,?3,?4 WHERE NOT EXISTS(SELECT 1 FROM artifact_readbacks WHERE artifact_id=?1)",params![id,sha,fingerprint,crate::engine::now()])?;
         Ok(body)
     }
 
