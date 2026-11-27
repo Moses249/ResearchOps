@@ -372,7 +372,12 @@ impl Engine {
             bail!("session lease expired or superseded; finalization rejected");
         }
         let observed:(String,String,Option<String>)=self.conn.query_row("SELECT system_status,business_status,final_input_sha256 FROM execution_sessions WHERE id=?1",[&session.id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
-        if observed.0!=result.system_status || observed.1!=result.business_status || observed.2!=fingerprint {bail!("session finalization readback mismatch");}
+        if observed.0 != result.system_status
+            || observed.1 != result.business_status
+            || observed.2 != fingerprint
+        {
+            bail!("session finalization readback mismatch");
+        }
         Ok(result)
     }
 

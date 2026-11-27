@@ -181,7 +181,14 @@ impl Engine {
             [run_id],
             |r| r.get(0),
         )?;
-        let pinned:Option<String>=tx.query_row("SELECT mode FROM run_contracts WHERE run_id=?1",[run_id],|r|r.get(0)).optional()?.flatten();
+        let pinned: Option<String> = tx
+            .query_row(
+                "SELECT mode FROM run_contracts WHERE run_id=?1",
+                [run_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
         if count == 0 || attempted > 0 || sessions > 0 || pinned.is_some() {
             bail!("contract binding is allowed only before execution");
         }

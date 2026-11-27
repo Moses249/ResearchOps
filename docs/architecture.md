@@ -63,7 +63,15 @@ The connection is a session-only object shared by the HTTP server. Keys are excl
 
 `agents.rs` coordinates separate Researcher and Verifier conversations. A deterministic gate rejects unknown sources, non-verbatim quotes, oversized outputs, and missing source citations before invoking the Verifier. Rejection feedback goes into the next Researcher request. Each delivery permits three rounds with bounded backoff; a task has at most three deliveries. No-evidence results produce an explicit gap, without persisting an unsupported answer.
 
-Agent events are durable and fenced by the current lease token. Approved answers and evidence commit together under the same lease checks as local results. Failed tasks retain their transcript and may be explicitly requeued if deliveries remain. Background job ownership is in memory; after a server restart, a user reconnects and resumes after lease expiry. Model calls may repeat after a crash.
+Agent events are durable and fenced by the current lease token. Approved answers, model-review receipts, evidence, and checkpoints commit together. Failed tasks retain their transcript and may be explicitly requeued if deliveries remain. The web server retains a convenience job index in memory; authoritative Runner ownership and leases live in SQL. After restart, reconnect and resume after session expiry. Model calls may repeat after a crash.
+
+## Execution completion contracts
+
+`contracts.rs` validates immutable policy versions and pins run/mode scope. `execution.rs` provides one Runner for manual/scheduled/recovery triggers, with monotonic budgets, UTC leases, explicit KST dates, recovery priority, and continuation across small batches. `checkpoints.rs` verifies actual SQL readbacks and binds report artifacts to current contract/scope/source/result fingerprints.
+
+The additive `execution` response separates system state from business state. Legacy bounded APIs retain their meaning; the dashboard uses `/execute`. Business completion requires a successful Runner finalization and every applicable evidence/readback/artifact gate. Missing weekly-report integrations are explicit blockers. Historical v1/v2 records remain queryable without fabricated proof. Safe recovery JSON is a diagnostic copy, never the SQL queue authority.
+
+Detailed invariants and acceptance criteria are in [execution-completion-contract](features/execution-completion-contract.md).
 
 ## Next extensions
 
@@ -72,6 +80,6 @@ Agent events are durable and fenced by the current lease token. Approved answers
 3. Add provider-independent structured extraction with evidence offsets and validation.
 4. Separate verified support, contradictions, and human review from lexical retrieval.
 5. Add a planned coverage matrix and an auditor using a distinct search strategy.
-6. Add PostgreSQL claims, heartbeat renewal, and worker daemon before multi-host deployment.
+6. Add PostgreSQL claims and a worker daemon before multi-host deployment; the local Runner already renews its session/task leases.
 
 Avoid building a general plugin loader or a second workflow runtime in advance of those requirements.
