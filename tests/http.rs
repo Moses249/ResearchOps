@@ -136,3 +136,81 @@ fn api_connection_is_session_only_and_redacts_credentials() {
     let (_, cleared) = server.json("DELETE", "/api/connection", json!({}));
     assert_eq!(cleared["configured"], false);
 }
+
+#[test]
+fn shared_execution_api_reports_system_completion_separately_from_business_partial() {
+    let server = Server::start();
+    let (status, contracts) = server.json("GET", "/api/contracts", json!(null));
+    assert_eq!(status, 200);
+    assert!(!contracts.as_array().unwrap().is_empty());
+    let spec: Value = serde_json::from_str(include_str!("../examples/research.json")).unwrap();
+    let (_, created) = server.json("POST", "/api/runs", spec);
+    let id = created["id"].as_str().unwrap();
+    let (status, _) = server.json(
+        "POST",
+        &format!("/api/runs/{id}/execute"),
+        json!({"mode":"local","trigger":"scheduled"}),
+    );
+    assert_eq!(status, 202);
+    let mut finished = None;
+    for _ in 0..100 {
+        let (_, run) = server.json("GET", &format!("/api/runs/{id}"), json!(null));
+        if run["agent_active"] == false {
+            finished = Some(run);
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let run = finished.expect("background execution did not finish");
+    assert_eq!(run["execution"]["latest"]["system_status"], "completed");
+    assert_eq!(run["execution"]["business_status"], "PARTIAL");
+    assert_eq!(run["execution"]["latest"]["trigger"], "scheduled");
+    assert_eq!(run["execution"]["counts"]["readback_verified"], 3);
+    let (status, recovery) = server.json("GET", &format!("/api/runs/{id}/recovery"), json!(null));
+    assert_eq!(status, 200);
+    assert!(recovery["execution"]["resume"]["sql"]
+        .as_str()
+        .unwrap()
+        .contains("?1"));
+}
+
+#[test]
+fn cli_execute_and_recovery_use_the_shared_runner() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("cli.db");
+    let created = Command::new(env!("CARGO_BIN_EXE_researchops"))
+        .arg("--db")
+        .arg(&db)
+        .args(["create", "--spec"])
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/research.json"))
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let id = String::from_utf8(created.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let executed = Command::new(env!("CARGO_BIN_EXE_researchops"))
+        .arg("--db")
+        .arg(&db)
+        .args(["execute", "--run", &id, "--trigger", "recovery"])
+        .output()
+        .unwrap();
+    assert!(
+        executed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    let result: Value = serde_json::from_slice(&executed.stdout).unwrap();
+    assert_eq!(result["business_status"], "PARTIAL");
+    assert_eq!(result["after"]["readback_verified"], 3);
+    let recovery = Command::new(env!("CARGO_BIN_EXE_researchops"))
+        .arg("--db")
+        .arg(&db)
+        .args(["recovery", "--run", &id])
+        .output()
+        .unwrap();
+    assert!(recovery.status.success());
+    let value: Value = serde_json::from_slice(&recovery.stdout).unwrap();
+    assert_eq!(value["runs"][0]["run_id"], id);
+}

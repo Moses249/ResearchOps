@@ -1,6 +1,8 @@
 use crate::{
     agents,
+    contracts::{Binding, ContractImport, Mode, Trigger},
     engine::{Engine, ResearchSpec},
+    execution::{self, SystemClock},
     provider::{ConnectionConfig, Provider},
 };
 use anyhow::Result;
@@ -51,7 +53,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": self.0.to_string()})),
+            Json(json!({"error": self.0.to_string(),"code":"request_failed","message":self.0.to_string(),"retryable":false,"stage":"request"})),
         )
             .into_response()
     }
@@ -101,6 +103,11 @@ pub async fn serve(db: PathBuf, addr: SocketAddr) -> Result<()> {
         .route("/api/runs/{id}", get(detail))
         .route("/api/runs/{id}/work", post(work))
         .route("/api/runs/{id}/report", get(report))
+        .route("/api/contracts", get(contracts).post(register_contract))
+        .route("/api/runs/{id}/contract", post(bind_contract))
+        .route("/api/runs/{id}/execute", post(start_execution))
+        .route("/api/recovery", get(recovery))
+        .route("/api/runs/{id}/recovery", get(run_recovery))
         .route(
             "/api/connection",
             get(connection).post(connect).delete(disconnect),
@@ -294,7 +301,7 @@ async fn report(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let content = db_call(state, move |db| db.report(&id)).await?;
+    let content = db_call(state, move |db| db.materialize_report(&id)).await?;
     Ok((
         [
             (header::CONTENT_TYPE, "text/markdown; charset=utf-8"),
@@ -305,4 +312,107 @@ async fn report(
         ],
         content,
     ))
+}
+
+async fn contracts(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    Ok(Json(db_call(state, |e| Ok(json!(e.contracts()?))).await?))
+}
+async fn register_contract(
+    State(state): State<AppState>,
+    Json(input): Json<ContractImport>,
+) -> Result<Json<Value>, ApiError> {
+    db_call(state, move |e| e.register_contract(input)).await?;
+    Ok(Json(json!({"registered":true})))
+}
+async fn bind_contract(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<Binding>,
+) -> Result<Json<Value>, ApiError> {
+    let _guard = reserve_job(&state, &id)?;
+    db_call(state, move |e| e.bind_contract(&id, input)).await?;
+    Ok(Json(json!({"bound":true})))
+}
+fn manual_trigger() -> Trigger {
+    Trigger::Manual
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExecuteInput {
+    mode: Mode,
+    #[serde(default = "manual_trigger")]
+    trigger: Trigger,
+}
+
+async fn start_execution(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<ExecuteInput>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let run = id.clone();
+    db_call(state.clone(), move |e| {
+        e.checked_policy(&run)?;
+        Ok(())
+    })
+    .await?;
+    let guard = reserve_job(&state, &id)?;
+    let provider = state.provider.read().await.clone();
+    let run = id.clone();
+    tokio::spawn(async move {
+        let _guard = guard;
+        match execution::execute(
+            state.db,
+            run.clone(),
+            input.mode,
+            input.trigger,
+            provider,
+            SystemClock::default(),
+        )
+        .await
+        {
+            Ok(result) if result.error.is_some() || !result.database_recorded => {
+                state
+                    .jobs
+                    .lock()
+                    .expect("jobs lock")
+                    .errors
+                    .insert(run, result.error.unwrap_or(result.stop_code));
+            }
+            Err(err) => {
+                state
+                    .jobs
+                    .lock()
+                    .expect("jobs lock")
+                    .errors
+                    .insert(run, execution::redact(&err.to_string(), None));
+            }
+            _ => {}
+        }
+    });
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"id":id,"agent_active":true,"accepted":true})),
+    ))
+}
+
+async fn recovery(State(state): State<AppState>) -> Json<Value> {
+    let database = db_call(state.clone(), |e| e.recovery_candidates()).await;
+    let files = execution::read_recovery_files(&state.db, None);
+    match database {
+        Ok(runs) => Json(json!({"runs":runs,"files":files})),
+        Err(err) => Json(
+            json!({"runs":[],"files":files,"database_error":execution::redact(&err.0.to_string(),None)}),
+        ),
+    }
+}
+async fn run_recovery(State(state): State<AppState>, Path(id): Path<String>) -> Json<Value> {
+    let run = id.clone();
+    let database = db_call(state.clone(), move |e| Ok(json!(e.execution_view(&run)?))).await;
+    let files = execution::read_recovery_files(&state.db, Some(&id));
+    match database {
+        Ok(view) => Json(json!({"execution":view,"files":files})),
+        Err(err) => Json(
+            json!({"execution":null,"files":files,"database_error":execution::redact(&err.0.to_string(),None)}),
+        ),
+    }
 }

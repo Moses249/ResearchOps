@@ -230,3 +230,76 @@ async fn dashboard_can_test_connection_and_run_agents_in_background() {
     mock_handle.abort();
     assert!(completed, "agent background job did not complete");
 }
+
+#[tokio::test]
+async fn shared_runner_records_model_proof_and_prevents_local_bypass() {
+    use researchops::{
+        contracts::{Mode, Trigger},
+        execution::{execute, SystemClock},
+    };
+    let (dir, id, mut provider, state, handle) = setup(false, false).await;
+    provider.test().await.unwrap();
+    provider.tested = true;
+    let result = execute(
+        dir.path().join("agents.db"),
+        id.clone(),
+        Mode::Agents,
+        Trigger::Manual,
+        Some(provider),
+        SystemClock::default(),
+    )
+    .await
+    .unwrap();
+    handle.abort();
+    assert_eq!(result.business_status, "COMPLETE");
+    assert_eq!(state.verifier.load(Ordering::SeqCst), 2);
+    let mut engine = Engine::open(dir.path().join("agents.db")).unwrap();
+    assert_eq!(engine.counts(&id).unwrap().model_reviewed, 1);
+    assert!(engine.work(&id, 100, 60).is_err());
+}
+
+#[tokio::test]
+async fn model_backoff_respects_the_remaining_execution_budget() {
+    use researchops::{
+        contracts::{md5_digest, Binding, ContractImport, Mode, Trigger},
+        execution::{execute, SystemClock},
+    };
+    let (dir, id, mut provider, state, handle) = setup(true, false).await;
+    provider.tested = true;
+    let body=json!({"profile":"model_reviewed_research","max_runtime_seconds":1,"batch_size":1,"sql_retries":2}).to_string();
+    let digest = md5_digest(&body);
+    let mut engine = Engine::open(dir.path().join("agents.db")).unwrap();
+    engine
+        .register_contract(ContractImport {
+            version: "budget-one".into(),
+            body,
+            expected_md5: digest.clone(),
+        })
+        .unwrap();
+    engine
+        .bind_contract(
+            &id,
+            Binding {
+                version: "budget-one".into(),
+                expected_md5: digest,
+            },
+        )
+        .unwrap();
+    drop(engine);
+    let result = execute(
+        dir.path().join("agents.db"),
+        id.clone(),
+        Mode::Agents,
+        Trigger::Manual,
+        Some(provider),
+        SystemClock::default(),
+    )
+    .await
+    .unwrap();
+    handle.abort();
+    assert_eq!(result.business_status, "PARTIAL");
+    assert_eq!(result.stop_code, "execution_budget_exhausted");
+    assert!(result.elapsed_ms >= 1000);
+    assert_eq!(state.researcher.load(Ordering::SeqCst), 1);
+    assert_eq!(result.after.unwrap().pending, 1);
+}

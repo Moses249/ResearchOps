@@ -1,6 +1,7 @@
 /target/
 /.tools/
 /data/
+**/recovery/
 *.db
 *.db-shm
 *.db-wal

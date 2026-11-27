@@ -94,12 +94,23 @@ impl Provider {
     }
 
     pub async fn ask(&self, verifier: bool, system: &str, input: &Value) -> Result<Value> {
+        self.ask_with_timeout(verifier, system, input, Duration::from_secs(30))
+            .await
+    }
+
+    pub async fn ask_with_timeout(
+        &self,
+        verifier: bool,
+        system: &str,
+        input: &Value,
+        timeout: Duration,
+    ) -> Result<Value> {
         let model = if verifier {
             &self.config.verifier_model
         } else {
             &self.config.researcher_model
         };
-        let mut request=self.client.post(format!("{}/chat/completions",self.config.base_url)).json(&json!({
+        let mut request=self.client.post(format!("{}/chat/completions",self.config.base_url)).timeout(timeout.min(Duration::from_secs(30))).json(&json!({
             "model":model,
             "messages":[{"role":"system","content":system},{"role":"user","content":input.to_string()}],
             "response_format":{"type":"json_object"}
