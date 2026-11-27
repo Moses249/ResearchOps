@@ -21,7 +21,7 @@ try {
         }
         $cargoCommand = $localCargo
     } else { $cargoCommand = 'cargo' }
-    $CargoArgs = switch ($Task) {
+    [string[]]$CargoArgs = @(switch ($Task) {
         'serve' { @('run', '--locked', '--', 'serve') }
         'demo' { @('run', '--locked', '--', 'demo') }
         'test' { @('test', '--locked') }
@@ -29,7 +29,7 @@ try {
         'format' { @('fmt') }
         'clippy' { @('clippy', '--locked', '--all-targets', '--', '-D', 'warnings') }
         'build' { @('build', '--locked') }
-    }
+    })
     & $cargoCommand @CargoArgs
     if ($LASTEXITCODE -ne 0) { throw "Cargo exited with code $LASTEXITCODE" }
 } finally { Pop-Location }

@@ -37,7 +37,7 @@ pub struct ResearchSpec {
     pub sources: Vec<SourceInput>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Finding {
     pub source_id: String,
     pub source_title: String,
@@ -56,6 +56,7 @@ pub struct TaskView {
     pub attempts: i64,
     pub last_error: Option<String>,
     pub findings: Vec<Finding>,
+    pub answer: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,6 +69,26 @@ pub struct RunView {
     pub processed_questions: usize,
     pub covered_questions: usize,
     pub tasks: Vec<TaskView>,
+    pub agent_events: Vec<AgentEvent>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentEvent {
+    pub task_id: String,
+    pub role: String,
+    pub round: i64,
+    pub status: String,
+    pub message: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Snapshot {
+    pub id: String,
+    pub title: String,
+    pub uri: String,
+    pub content: String,
+    pub content_hash: String,
 }
 
 #[derive(Debug)]
@@ -98,6 +119,7 @@ impl Engine {
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")?;
         conn.execute_batch(include_str!("../migrations/001_initial.sql"))?;
+        conn.execute_batch(include_str!("../migrations/002_agents.sql"))?;
         Ok(Self { conn })
     }
 
@@ -143,9 +165,17 @@ impl Engine {
             .optional()?
             .context("research run not found")?;
         let mut tasks = self.conn.prepare("SELECT id,question,status,attempts,last_error FROM tasks WHERE run_id=?1 ORDER BY rowid")?
-            .query_map([id], |r| Ok(TaskView {id:r.get(0)?,question:r.get(1)?,status:r.get(2)?,attempts:r.get(3)?,last_error:r.get(4)?,findings:vec![]}))?
+            .query_map([id], |r| Ok(TaskView {id:r.get(0)?,question:r.get(1)?,status:r.get(2)?,attempts:r.get(3)?,last_error:r.get(4)?,findings:vec![],answer:None}))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         for task in &mut tasks {
+            task.answer = self
+                .conn
+                .query_row(
+                    "SELECT answer FROM agent_answers WHERE task_id=?1",
+                    [&task.id],
+                    |r| r.get(0),
+                )
+                .optional()?;
             task.findings = self.conn.prepare("SELECT s.id,s.title,s.uri,s.content_hash,f.quote,f.score,f.verification FROM findings f JOIN sources s ON s.id=f.source_id WHERE f.task_id=?1 ORDER BY f.score DESC,s.title,s.id")?
                 .query_map([&task.id], |r| Ok(Finding {source_id:r.get(0)?,source_title:r.get(1)?,source_uri:r.get(2)?,source_hash:r.get(3)?,quote:r.get(4)?,score:r.get(5)?,verification:r.get(6)?}))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -175,7 +205,49 @@ impl Engine {
             processed_questions: processed,
             covered_questions: covered,
             tasks,
+            agent_events: self.events(id)?,
         })
+    }
+
+    pub fn snapshots(&self, run_id: &str) -> Result<Vec<Snapshot>> {
+        Ok(self.conn.prepare("SELECT id,title,uri,content,content_hash FROM sources WHERE run_id=?1 ORDER BY rowid")?
+            .query_map([run_id], |r| Ok(Snapshot {id:r.get(0)?,title:r.get(1)?,uri:r.get(2)?,content:r.get(3)?,content_hash:r.get(4)?}))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn events(&self, run_id: &str) -> Result<Vec<AgentEvent>> {
+        Ok(self.conn.prepare("SELECT task_id,role,round,status,message,created_at FROM agent_events WHERE run_id=?1 ORDER BY id")?
+            .query_map([run_id], |r| Ok(AgentEvent {task_id:r.get(0)?,role:r.get(1)?,round:r.get(2)?,status:r.get(3)?,message:r.get(4)?,created_at:r.get(5)?}))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn event(
+        &mut self,
+        claim: &Claim,
+        role: &str,
+        round: i64,
+        status: &str,
+        message: &str,
+    ) -> Result<()> {
+        let changed = self.conn.execute("INSERT INTO agent_events(task_id,run_id,role,round,status,message,created_at) SELECT id,run_id,?4,?5,?6,?7,?8 FROM tasks WHERE id=?1 AND run_id=?2 AND status='running' AND lease_token=?3 AND lease_until>?8",params![claim.task_id,claim.run_id,claim.token,role,round,status,message,now()])?;
+        if changed != 1 {
+            bail!("lease expired or claim superseded; event rejected");
+        }
+        Ok(())
+    }
+
+    pub fn reject(&mut self, claim: &Claim, message: &str) -> Result<()> {
+        let changed=self.conn.execute("UPDATE tasks SET status='failed',last_error=?4,lease_token=NULL,lease_until=NULL WHERE id=?1 AND run_id=?2 AND status='running' AND lease_token=?3 AND lease_until>?5",params![claim.task_id,claim.run_id,claim.token,message,now()])?;
+        if changed != 1 {
+            bail!("lease expired or claim superseded; rejection refused");
+        }
+        Ok(())
+    }
+
+    pub fn retry_failed(&mut self, run_id: &str) -> Result<usize> {
+        self.get(run_id)?;
+        // A failed task has no committed findings. Keep its history and delivery budget.
+        Ok(self.conn.execute("UPDATE tasks SET status='pending',available_at=0,last_error=NULL WHERE run_id=?1 AND status='failed' AND attempts<3",[run_id])?)
     }
 
     // Every delivery gets a new fencing token. Expired workers cannot commit.
@@ -239,6 +311,25 @@ impl Engine {
     }
 
     pub fn finish(&mut self, claim: &Claim, findings: &[Finding], at: i64) -> Result<()> {
+        self.finish_result(claim, findings, None, at)
+    }
+
+    pub fn finish_agent(
+        &mut self,
+        claim: &Claim,
+        findings: &[Finding],
+        answer: &str,
+    ) -> Result<()> {
+        self.finish_result(claim, findings, Some(answer), now())
+    }
+
+    fn finish_result(
+        &mut self,
+        claim: &Claim,
+        findings: &[Finding],
+        answer: Option<&str>,
+        at: i64,
+    ) -> Result<()> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -260,6 +351,12 @@ impl Engine {
                 bail!("evidence does not match the stored source snapshot");
             }
             tx.execute("INSERT OR IGNORE INTO findings(task_id,source_id,quote,score,verification) VALUES(?1,?2,?3,?4,'exact_quote')",params![claim.task_id,finding.source_id,finding.quote,finding.score])?;
+        }
+        if let Some(answer) = answer {
+            tx.execute(
+                "INSERT INTO agent_answers(task_id,answer) VALUES(?1,?2)",
+                params![claim.task_id, answer],
+            )?;
         }
         tx.commit()?;
         Ok(())
@@ -297,7 +394,7 @@ impl Engine {
 
     pub fn report(&self, id: &str) -> Result<String> {
         let run = self.get(id)?;
-        let mut out = format!("# ResearchOps evidence report\n\n**Objective:** {}\n\nRun: `{}` · Status: **{}**\n\nProcessed: {}/{} questions · Lexical evidence coverage: {}/{} questions\n\n> This is extractive keyword retrieval over supplied snapshots. An exact quote proves text provenance, not factual truth or that the question is answered. Coverage is limited to supplied documents; no independent web audit or LLM synthesis has run.\n", md(&run.objective), run.id,run.status,run.processed_questions,run.total_questions,run.covered_questions,run.total_questions);
+        let mut out = format!("# ResearchOps evidence report\n\n**Objective:** {}\n\nRun: `{}` · Status: **{}**\n\nProcessed: {}/{} questions · Evidence coverage: {}/{} questions\n\n> An exact quote proves text provenance, not factual truth. Coverage is limited to supplied documents. Answers labeled model-reviewed passed a separate verifier conversation, which can still be wrong. Tasks without an answer use lexical retrieval only. No independent web audit has run.\n", md(&run.objective), run.id,run.status,run.processed_questions,run.total_questions,run.covered_questions,run.total_questions);
         for task in run.tasks {
             out.push_str(&format!(
                 "\n## {}\n\nTask: {} · Attempts: {}\n",
@@ -308,11 +405,19 @@ impl Engine {
             if task.findings.is_empty() {
                 out.push_str("\n**Gap:** no matching evidence recorded. Review source coverage or refine the question.\n");
             }
+            if let Some(answer) = &task.answer {
+                out.push_str(&format!("\n**Model-reviewed answer:** {}\n", md(answer)));
+            }
             if let Some(error) = task.last_error {
                 out.push_str(&format!("\nError: {}\n", md(&error)));
             }
             for f in task.findings {
-                out.push_str(&format!("\n### Source: {}\n\n{}\n\n> {}\n\nEvidence: `{}` · Keyword overlap: {:.0}%\n\nSnapshot SHA-256: `{}`\n",md(&f.source_title),md(&f.source_uri),f.quote.lines().map(md).collect::<Vec<_>>().join("\n> "),f.verification,f.score*100.0,f.source_hash));
+                let assessment = if task.answer.is_some() {
+                    "Model-reviewed evidence".to_string()
+                } else {
+                    format!("Keyword overlap: {:.0}%", f.score * 100.0)
+                };
+                out.push_str(&format!("\n### Source: {}\n\n{}\n\n> {}\n\nEvidence: `{}` · {}\n\nSnapshot SHA-256: `{}`\n",md(&f.source_title),md(&f.source_uri),f.quote.lines().map(md).collect::<Vec<_>>().join("\n> "),f.verification,assessment,f.source_hash));
             }
         }
         Ok(out)

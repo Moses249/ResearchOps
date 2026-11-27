@@ -117,3 +117,22 @@ fn api_rejects_invalid_specs_and_non_json_mutations() {
     assert_eq!(status, 200);
     assert_eq!(runs.as_array().unwrap().len(), 0);
 }
+
+#[test]
+fn api_connection_is_session_only_and_redacts_credentials() {
+    let server = Server::start();
+    let (status, initial) = server.json("GET", "/api/connection", json!(null));
+    assert_eq!(status, 200);
+    assert_eq!(initial["configured"], false);
+    let (status,saved)=server.json("POST","/api/connection",json!({"base_url":"https://example.com/v1","researcher_model":"r","verifier_model":"v","api_key":"never-return-this-key"}));
+    assert_eq!(status, 200);
+    assert_eq!(saved["has_key"], true);
+    assert_eq!(saved["tested"], false);
+    assert!(!saved.to_string().contains("never-return-this-key"));
+    let (_, view) = server.json("GET", "/api/connection", json!(null));
+    assert!(!view.to_string().contains("never-return-this-key"));
+    let (status, _) = server.json("POST", "/api/runs/missing/agents", json!({}));
+    assert_eq!(status, 400);
+    let (_, cleared) = server.json("DELETE", "/api/connection", json!({}));
+    assert_eq!(cleared["configured"], false);
+}

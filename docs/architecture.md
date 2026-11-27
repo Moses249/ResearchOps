@@ -53,11 +53,19 @@ A task can succeed with zero findings. That records a completed attempt with an 
 
 ## Research quality boundary
 
-Lexical matching and quote provenance do not establish entailment, truth, source independence, or research completeness. No free-form answer is generated in this release. The report exposes candidate passages and missing coverage for human review. Source text is treated as data and is never executed as instructions.
+Lexical matching and quote provenance do not establish entailment, truth, source independence, or research completeness. Local mode exposes candidate passages and missing coverage. Optional API mode adds model-reviewed answers, which still require human judgment. Source text is treated as untrusted data.
 
 The synthetic example has two supported topic questions and one deliberately absent benchmark question. It is a functional fixture, not a live research-quality benchmark.
 
-## Extension order
+## Optional API agent pipeline
+
+The connection is a session-only object shared by the HTTP server. Keys are excluded from response types and never stored in the database. Each job captures a connection snapshot so later edits cannot redirect its remaining calls. Provider redirects are disabled, remote URLs require HTTPS, and requests have a 30-second timeout and a 1 MB response cap.
+
+`agents.rs` coordinates separate Researcher and Verifier conversations. A deterministic gate rejects unknown sources, non-verbatim quotes, oversized outputs, and missing source citations before invoking the Verifier. Rejection feedback goes into the next Researcher request. Each delivery permits three rounds with bounded backoff; a task has at most three deliveries. No-evidence results produce an explicit gap, without persisting an unsupported answer.
+
+Agent events are durable and fenced by the current lease token. Approved answers and evidence commit together under the same lease checks as local results. Failed tasks retain their transcript and may be explicitly requeued if deliveries remain. Background job ownership is in memory; after a server restart, a user reconnects and resumes after lease expiry. Model calls may repeat after a crash.
+
+## Next extensions
 
 1. Introduce explicit adapter interfaces when adding the second ingestion mechanism.
 2. Add source retrieval timestamps, fetch policy, and bounded HTTP retrieval.
