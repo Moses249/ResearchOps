@@ -1,0 +1,6 @@
+#!/bin/sh
+subject=$(head -n 1 "$1")
+if ! printf '%s\n' "$subject" | grep -Eq '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([A-Za-z0-9._/-]+\))?!?: .+'; then
+    echo 'Commit rejected: use <type>[optional scope]: description (e.g. feat: add API connections).' >&2
+    exit 1
+fi
