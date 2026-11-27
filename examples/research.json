@@ -1,0 +1,20 @@
+{
+  "objective": "Compare the reliability mechanisms available for a small research workflow engine",
+  "questions": [
+    "How do worker leases support recovery?",
+    "How does idempotency prevent duplicate findings?",
+    "What benchmark latency has been measured?"
+  ],
+  "sources": [
+    {
+      "title": "Synthetic design note — recovery",
+      "uri": "fixture://researchops/recovery",
+      "content": "Worker leases give a task a temporary owner. After leases expire, another worker can claim the task for recovery. A fencing token prevents an old worker from committing results after reassignment."
+    },
+    {
+      "title": "Synthetic design note — data integrity",
+      "uri": "fixture://researchops/integrity",
+      "content": "Idempotency prevents duplicate findings when a task is retried. Unique database constraints enforce the identity of each finding. Source snapshots preserve the original text and its SHA-256 hash."
+    }
+  ]
+}
