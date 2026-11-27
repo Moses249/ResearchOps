@@ -295,7 +295,10 @@ $('research-form').onsubmit = async event => {
     const contract = contractOptions.find(value => value.version === $('contract-picker').value);
     if (contract) await api('/api/runs/' + id + '/contract', {version: contract.version, expected_md5: contract.md5});
     await selectRun(id);
-  } catch (error) { $('form-error').textContent = error.message; }
+  } catch (error) {
+    id = undefined;
+    $('form-error').textContent = error.message;
+  }
   finally { setBusy(false); }
   if (id) await processRun(id).catch(showError);
 };
