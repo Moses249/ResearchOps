@@ -1,4 +1,4 @@
-> **phase:** implement · Design + tasks approved 2026-11-28 · owner @Moses249
+> **phase:** release · Design + tasks approved 2026-11-28 · owner @Moses249
 
 # Feature: execution-completion-contract
 
@@ -211,7 +211,7 @@ DB 재시도 helper에는 재실행이 안전한 operation만 전달한다. Busy
 
 ## Verification
 
-- **verdict:** FAIL — 최종 CI에서 AC-6 snapshot 경합을 재개했다. 이전 독립 결과는 유지하며 해당 수정 재검증 대기 중이다.
+- **verdict:** PASS — AC-1–12 모두 통과, 최종 snapshot 회귀도 독립 재검증 완료.
 - **Tester:** `/root/independent_qa` (새 읽기 전용 QA; 동일 독립 검증자가 증분 재검증).
 - **검증 범위:** `origin/main..0dd4b84`, 이후 수정 `0dd4b84..aaeb482`.
 - **최종 로컬 게이트:** 41개 테스트 통과 (provider 2, agents 5, execution 15, HTTP/CLI 5, migration 3, reliability 11), fmt·Clippy·build·이름 규칙 통과. HTTP 소유 포트 수정 후 통합 테스트도 통과.
@@ -280,3 +280,11 @@ Regression 차원은 migration·persistence·receipt/artifact·typed 오류·Run
 ### 최종 CI snapshot 회귀
 
 CI `46047562814`에서 비활성 job flag와 이전에 읽은 running SQL snapshot의 조합을 관측했다. implement로 되돌리고 T7/T9·AC-6을 다시 열었다. detail handler는 동기 DB callback 내부에서만 job-state mutex를 잡고 run·flag를 함께 읽어 직렬화한다. 그 사이 예약·job 종료가 끼어들 수 없고 await를 가로질러 mutex를 보유하지 않는다. 기존 HTTP 완료 경계 사례는 8회 반복하며 엄격한 종료 상태 assertion을 유지한다. 수정 후 41개 로컬 테스트와 fmt·Clippy·build가 통과했으며 독립 재검증 대기 중이다.
+
+### 독립 QA 3차 — snapshot 회귀 해소
+
+Tester `/root/independent_qa`가 `2a07c03..b00a3cf`를 독립 재검증해 **PASS**. 동시 실행 stream 4개, run 40개, run별 poller 3개로 snapshot 2,403개를 읽었으며 비활성 worker·과거 running 조합은 0회였다. COMPLETE와 근거 누락 PARTIAL 모두 올바른 종료 상태·readback을 반환했다.
+
+없는 run·session JSON 오류 주입은 HTTP 400을 반환하고 mutex를 해제했으며 이후 run 예약·완료가 정상 작동했다. legacy bounded work는 작업 1개만 처리하고 COMPLETE를 부여하지 않았고 provider 없는 agents는 400 후 공통 실행으로 재개됐다. checkpoint 실패 주입은 비활성/failed/PARTIAL과 일치하는 오류를 표시했다. 잠금·호출자 검토에서 await를 가로지르는 mutex나 Engine→jobs 역방향 의존성은 없었다. 독립 scratch 서버·DB를 사용하고 종료했다. Regression·오류 차원을 계속 적용하며 변경 없는 AC 결과는 유지한다.
+
+`b00a3cf`의 Linux·Windows push/PR CI 통과. 이후 최종 커밋은 한·영 증거·phase 기록만 변경하며 현재 head 결과는 PR checks에서 확인한다. 병합·버전 출시는 관리자가 결정한다.

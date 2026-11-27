@@ -1,4 +1,4 @@
-> **phase:** implement · Design + tasks approved 2026-11-28 · owner @Moses249
+> **phase:** release · Design + tasks approved 2026-11-28 · owner @Moses249
 
 # Feature: execution-completion-contract
 
@@ -187,7 +187,7 @@ Use a new execution route instead of changing bounded legacy semantics; test tha
 
 ## Verification
 
-- **verdict:** FAIL — final CI reopened an AC-6 snapshot race; previous independent results are retained, with a focused re-test pending.
+- **verdict:** PASS — all AC-1–12; final snapshot regression independently closed.
 - **Tester:** `/root/independent_qa` (fresh read-only QA; incremental re-test by the same independent tester).
 - **Reviewed range:** `origin/main..0dd4b84`, then fix `0dd4b84..aaeb482`.
 - **Final local gate:** 41 tests passed (provider 2, agents 5, execution 15, HTTP/CLI 5, migration 3, reliability 11); fmt, Clippy, build and naming passed. HTTP tests also passed after the owned-port harness correction.
@@ -256,3 +256,11 @@ Regression dimension remains applied to migration, persistence, receipts/artifac
 ### Final CI snapshot regression
 
 CI run `46047562814` observed an inactive job flag paired with a previously read running SQL snapshot. Returned to implement (T7/T9, AC-6). The detail handler now holds the job-state mutex only inside the synchronous database callback while reading and serializing the run plus flag. Reservation and job termination cannot interleave that read; no mutex spans an await. The existing completion-boundary HTTP case now repeats eight runs and retains the strict terminal-state assertion. The 41-test local gate, fmt, Clippy and build passed after this correction; focused independent verification is pending.
+
+### Independent round 3 — snapshot regression closed
+
+Tester `/root/independent_qa` independently verified `2a07c03..b00a3cf`: **PASS**. Four execution streams, 40 runs and three pollers per run produced 2,403 snapshots, with zero inactive-worker/stale-running combinations. Both COMPLETE and evidence-gap PARTIAL had correct terminal state/readbacks.
+
+Missing-run and injected malformed-session JSON errors returned HTTP 400 and released the mutex; a subsequent run reserved and completed. Legacy bounded work processed one task without granting COMPLETE; missing-provider agents returned 400 and shared execution could subsequently resume. An injected checkpoint error produced inactive/failed/PARTIAL with the matching error. Lock/caller review found no mutex across await or reverse Engine-to-jobs dependency. The scratch server/database was isolated and stopped. Regression and error-handling dimensions remain applied; unaffected AC results are retained.
+
+Linux and Windows push/PR CI passed for `b00a3cf`. The final commit after this verification changes only this bilingual evidence/phase record; PR checks retain the current-head result. Merge and version release are maintainer decisions.
