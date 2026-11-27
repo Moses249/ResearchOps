@@ -202,3 +202,35 @@ Browser verification exercised contract selection, shared execution, textual sta
 - Returned to implement; T2, T6 and T9 reopened. Fix scope: v4 immutable-ledger collision/observation guards, v3 upgrade preservation, safe idempotent insert callsites and typed post-commit stage diagnostics. Windows CI additionally exposed a wall-clock-dependent one-second budget test, replaced with an injected clock.
 
 Independent re-verification is required for this incremental fix. Implementation and mock evidence do not establish production completion.
+
+### Independent coverage (round 1, retained for unchanged behavior)
+
+| AC | Performed boundary / negative cases and observed result | Result |
+| --- | --- | --- |
+| AC-1 | Seven minimum/maximum/out-of-range limit combinations and two unsupported policies; invalid policies rejected, reviewed-policy local start rejected with zero attempts. Digest/mode gate tests inspected. | PASS |
+| AC-2 | Three supported questions, batch one: one session, three successes/readbacks, COMPLETE. Invalid/empty specs covered by the main gate. | PASS |
+| AC-3 | Retried task before fresh task; other run stayed at zero attempts; active duplicate rejected before claims. Concurrent/stale-token gate evidence inspected. | PASS |
+| AC-4 | Injected checkpoint failure rolled back findings and task transition; tampering blocked COMPLETE. Findings UPDATE and immutable-row REPLACE were accepted. | FAIL; fix requires re-test |
+| AC-5 | Delayed retry completed after approximately 2.2 seconds; next eligibility beyond a one-second budget returned PARTIAL with its timestamp. | PASS |
+| AC-6 | Evidence gap produced system completed/business PARTIAL with legacy partial; changed objective invalidated artifact/finalization. Actual model-proof gate inspected. | PASS |
+| AC-7 | Post-commit receipt interruption repaired in a fresh invocation, attempts remained one and exactly one receipt. Bounded transient/semantic retry gate evidence inspected. | PASS |
+| AC-8 | Injected Authorization error redacted; counts and bound SQL present. DB failure exported discoverable JSON with unknown counts null; DB plus file failure reported both. Post-commit stage was incorrect. | FAIL; fix requires re-test |
+| AC-9 | Maximum limits accepted and invalid limits rejected; budget boundary preserved eligibility; expired session recorded interrupted/session_lease_expired with unknown cause. Monotonic exhaustion gate inspected. | PASS |
+| AC-10 | Three CLI triggers gave equivalent gap outcomes across fresh processes; missing provider left attempts zero. Restored agent UI requested reconnect and made zero execute calls. | PASS |
+| AC-11 | v1/v2 historical findings and v2 answer/verifier event retained with original timestamps, zero invented storage/model receipts; objective changes invalidated stale artifacts. | PASS |
+| AC-12 | Weekly fixture and bounded-route bypass remained blocked by external proof gates. Auth error redacted. Plain-text rendering, labeled native selector, buttons/details/summary and alert semantics inspected. | PASS |
+
+### Dimensions exercised
+
+| Dimension | Disposition and evidence |
+| --- | --- |
+| Functional / boundaries / errors | Applied across AC-1–12 through independent CLI/SQLite and JavaScript VM probes. |
+| State / data integrity | Applied: atomic rollback, receipt interruption, mutations, replacement collision, current-input artifacts and history. |
+| Concurrency / recovery | Applied: active duplicate, scope/priority probes; main-gate stale/concurrent claim results reviewed. |
+| API / schema / compatibility | Applied: actual migrations plus legacy CLI and HTTP route dependency review. |
+| Privacy / accessibility | Applied within local scope: structured policies, redaction/allowlist, plain-text rendering and native keyboard controls. No screen-reader certification asserted. |
+| Regression | **Applied.** Full changed definitions and callers checked: Engine create/get/list/claim/work/finish/report; contracts; checkpoints/artifacts; Runner; agent preflight/background processing; provider; HTTP execute/work/agents/report/recovery; CLI execute/work/status/list/report/demo; dashboard create/bind/process/poll/retry/resume. |
+| Production / multi-host / scheduler | Skipped: explicitly outside scope; fixtures prove no external delivery. |
+| Performance benchmarks | Skipped: no throughput/latency AC; execution-budget boundaries were exercised. |
+
+Independent evidence was generated in ignored local scratch: seventeen probe groups, five supplemental migration/fallback/preflight probes, UI reconnect checks, replacement and stage reproductions. Private local data and recovery files are not published. Round 1 reused the performed 39-test main gate instead of rerunning it.

@@ -1,8 +1,8 @@
 use serde_json::{json, Value};
 use std::{
-    io::{Read, Write},
-    net::{TcpListener, TcpStream},
-    process::{Child, Command, Stdio},
+    io::{BufRead, BufReader, Read, Write},
+    net::TcpStream,
+    process::{Child, ChildStdout, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -10,6 +10,7 @@ use std::{
 struct Server {
     child: Child,
     port: u16,
+    _stdout: BufReader<ChildStdout>,
     _dir: tempfile::TempDir,
 }
 impl Drop for Server {
@@ -21,20 +22,30 @@ impl Drop for Server {
 impl Server {
     fn start() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let socket = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = socket.local_addr().unwrap().port();
-        drop(socket);
-        let child = Command::new(env!("CARGO_BIN_EXE_researchops"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_researchops"))
             .arg("--db")
             .arg(dir.path().join("http.db"))
-            .args(["serve", "--port", &port.to_string()])
-            .stdout(Stdio::null())
+            .args(["serve", "--port", "0"])
+            .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
+        // Let the child retain the OS-assigned port. Releasing a reservation
+        // before spawn lets parallel tests mistake another server for their own.
+        let mut startup = String::new();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        stdout.read_line(&mut startup).unwrap();
+        let port = startup
+            .trim()
+            .rsplit(':')
+            .next()
+            .expect("server startup address")
+            .parse()
+            .expect("server must announce its bound port");
         let mut server = Self {
             child,
             port,
+            _stdout: stdout,
             _dir: dir,
         };
         let deadline = Instant::now() + Duration::from_secs(15);

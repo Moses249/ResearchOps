@@ -226,3 +226,35 @@ DB 재시도 helper에는 재실행이 안전한 operation만 전달한다. Busy
 - implement로 되돌리고 T2·T6·T9를 다시 열었다. 수정 범위는 v4 원장 충돌·관측 보호, v3 업그레이드 보존, 멱등 insert 호출, commit 이후의 typed 단계 진단이다. Windows CI에서 드러난 1초 예산 테스트의 실제 시간 의존성도 주입 시계로 바꿨다.
 
 증분 수정에 대한 독립 재검증이 필요하다. 위 구현·mock 증거는 운영 업무 완료의 증거가 아니다.
+
+### 독립 검증 범위 (1차, 변경 없는 동작의 결과 유지)
+
+| AC | 수행한 경계·실패 사례와 관측 결과 | 결과 |
+| --- | --- | --- |
+| AC-1 | 최소·최대·범위 밖 제한 7조합과 미지원 정책 2개: 잘못된 정책 거부, 검토 필수 정책의 local 실행은 attempts 0으로 거부. digest·mode 게이트 테스트 확인. | PASS |
+| AC-2 | 근거 있는 질문 3개, batch 1: 한 세션에서 success/readback 3개와 COMPLETE. 빈 입력·잘못된 spec은 전체 게이트에서 검증. | PASS |
+| AC-3 | 재시도 작업 우선, 다른 run attempts 0 유지, 활성 중복 세션은 claim 전에 거부. 동시·stale-token 게이트 증거 확인. | PASS |
+| AC-4 | checkpoint 실패 주입은 findings·task 전이를 rollback, 변조는 COMPLETE 차단. findings UPDATE와 원장 REPLACE는 허용됨. | FAIL; 수정 재검증 필요 |
+| AC-5 | 지연 재시도는 약 2.2초 후 완료. 다음 적격 시간이 1초 예산 밖이면 PARTIAL과 실제 timestamp 반환. | PASS |
+| AC-6 | 근거 누락 시 system completed/business PARTIAL 및 legacy partial. objective 변경 시 artifact·finalization 무효. 실제 모델 검토 증거 게이트 확인. | PASS |
+| AC-7 | commit 후 receipt 중단을 새 호출에서 복구, attempts 1 유지와 receipt 정확히 1개. transient 제한·semantic 무재실행 증거 확인. | PASS |
+| AC-8 | Authorization 오류 redaction, counts·binding SQL 확인. DB 실패 시 발견 가능한 JSON과 미확인 counts null, DB·파일 동시 실패도 표시. commit 이후 단계는 잘못 표시됨. | FAIL; 수정 재검증 필요 |
+| AC-9 | 최대 제한 허용·잘못된 제한 거부. 예산 경계에 다음 적격 시간 보존. 만료 세션은 interrupted/session_lease_expired와 원인 미확인 기록. 단조 시계 게이트 확인. | PASS |
+| AC-10 | 새 프로세스에서 세 CLI trigger가 같은 근거 누락 결과. provider 부재는 attempts 0. 복원한 agent UI는 재연결 창을 열고 execute 호출 0. | PASS |
+| AC-11 | v1/v2 실제 과거 findings, v2 answer·verifier event·timestamp 유지. 꾸며낸 storage/model receipt 0. objective 변경 시 과거 artifact 무효. | PASS |
+| AC-12 | weekly fixture와 bounded 우회는 외부 증거 게이트로 차단. auth redaction, 텍스트 렌더링, label 있는 native selector·button·details/summary·alert 의미 확인. | PASS |
+
+### Dimensions exercised
+
+| 차원 | 적용과 증거 |
+| --- | --- |
+| 기능·경계·오류 | 적용: AC-1–12의 독립 CLI/SQLite와 JavaScript VM 사례. |
+| 상태·데이터 무결성 | 적용: atomic rollback, receipt 중단, 수정·replacement 충돌, 현재 입력 artifact와 과거 데이터. |
+| 동시성·복구 | 적용: 활성 중복, scope·우선순위, 전체 게이트의 stale·동시 claim 결과 확인. |
+| API·schema·호환성 | 적용: 실제 migration과 legacy CLI·HTTP 호출 의존성 검토. |
+| 개인정보·접근성 | 로컬 범위 적용: 구조화 정책, redaction·allowlist, 텍스트와 native 키보드 컨트롤. screen reader 인증은 주장하지 않음. |
+| Regression | **적용.** 변경 정의와 호출자 확인: Engine create/get/list/claim/work/finish/report, contract, checkpoint/artifact, Runner, agent preflight/background, provider, HTTP execute/work/agents/report/recovery, CLI execute/work/status/list/report/demo, dashboard create/bind/process/poll/retry/resume. |
+| 운영·multi-host·scheduler | 제외: 명시적 범위 밖. fixture는 외부 전송 증거가 아님. |
+| 성능 benchmark | 제외: 처리량·latency AC 없음. 실행 예산 경계는 검증함. |
+
+독립 증거는 Git 제외 로컬 scratch에 생성했다: probe 17그룹, migration·fallback·preflight 추가 5그룹, UI 재연결, replacement·단계 재현. 비공개 로컬 데이터와 recovery 파일은 게시하지 않는다. 1차 QA는 전체 suite를 반복하지 않고 실제 수행된 39개 게이트 결과를 확인했다.
