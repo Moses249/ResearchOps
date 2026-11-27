@@ -1,4 +1,4 @@
-> **phase:** implement · Design + tasks approved 2026-11-28 · owner @Moses249
+> **phase:** test · Design + tasks approved 2026-11-28 · owner @Moses249
 
 # Feature: execution-completion-contract
 
@@ -211,4 +211,10 @@ DB 재시도 helper에는 재실행이 안전한 operation만 전달한다. Busy
 
 ## Verification
 
-승인된 설계에 따라 구현한 후 독립 QA의 AC별 관측 결과를 기록한다. 기존 테스트 결과나 구현 초안을 PASS로 전용하지 않는다.
+### 구현 게이트 증거 (2026-11-28)
+
+로컬 전체 테스트 39개 통과: provider 2, agents 5, execution contract 14, HTTP/CLI 5, migration 2, reliability 11. `scripts/dev.ps1 fmt`, `clippy`, `build`, `scripts/check-conventions.ps1` 통과. 전체 실행 명령은 `scripts/dev.ps1 test`이며 HTTP/모델은 운영 연결 대신 로컬 mock으로 검증했다.
+
+브라우저에서 계약 선택, 공통 실행, 텍스트 상태, 복구 후보와 매개변수 SQL을 확인했다. 질문 3개 fixture는 system `completed`, business `PARTIAL`, readback 3개와 근거 누락을 표시했다. 근거가 충족된 질문 1개 실행은 system `completed`, business `COMPLETE`, readback 1개와 열린 게이트 없음으로 표시했다. 별도 JavaScript 실패 주입으로 계약 연결이 거부되면 실행하지 않는 것을 확인했다.
+
+독립 QA의 AC별 검증은 아직 대기 중이다. 위 구현 검사는 운영 업무 완료의 증거가 아니다.

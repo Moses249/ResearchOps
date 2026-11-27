@@ -1,4 +1,4 @@
-> **phase:** implement · Design + tasks approved 2026-11-28 · owner @Moses249
+> **phase:** test · Design + tasks approved 2026-11-28 · owner @Moses249
 
 # Feature: execution-completion-contract
 
@@ -187,4 +187,10 @@ Use a new execution route instead of changing bounded legacy semantics; test tha
 
 ## Verification
 
-Record independent AC-specific observations after approved implementation. Do not reuse baseline tests or unverified draft code as a PASS for this feature.
+### Implementation gate evidence (2026-11-28)
+
+39 local tests passed: provider 2, agents 5, execution contract 14, HTTP/CLI 5, migration 2, reliability 11. `scripts/dev.ps1 fmt`, `clippy`, `build`, and `scripts/check-conventions.ps1` passed. The full-suite invocation was `scripts/dev.ps1 test`; HTTP/model tests used local mocks, not production adapters.
+
+Browser verification exercised contract selection, shared execution, textual states, recovery candidates and parameterized resume SQL. A three-question fixture produced system `completed`, business `PARTIAL`, three readbacks and an evidence gap. A fully supported one-question run produced system `completed`, business `COMPLETE`, one readback and no gates. A separate JavaScript failure injection confirmed a rejected contract binding never starts execution.
+
+Independent AC-specific verification is pending. These implementation checks do not establish production completion.
