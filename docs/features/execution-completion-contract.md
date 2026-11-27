@@ -1,4 +1,4 @@
-> **phase:** design · Plan approved 2026-11-27 · owner @Moses249
+> **phase:** implement · Design + tasks approved 2026-11-28 · owner @Moses249
 
 # Feature: execution-completion-contract
 
@@ -198,7 +198,7 @@ DB 재시도 helper에는 재실행이 안전한 operation만 전달한다. Busy
 | T7 | API/CLI와 legacy 호환 경로 연결 | AC-1, AC-6, AC-8, AC-10, AC-11 |
 | T8 | UI 계약·system/business 상태·Gate·resume·접근성 | AC-6, AC-8, AC-12 |
 | T9 | 오류/시간/재시작/동시성/호환 테스트·사용 문서 | AC-1~AC-12 |
-| T10 | fresh read-only QA·결함 회귀·Draft PR 증거 정리 | AC-1~AC-12 |
+| T10 | 독립 QA 준비·Draft PR 증거 정리 (실제 독립 검증은 test 단계) | AC-1~AC-12 |
 
 ### Risks and alternatives
 

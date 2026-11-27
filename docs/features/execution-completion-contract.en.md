@@ -1,4 +1,4 @@
-> **phase:** design · Plan approved 2026-11-27 · owner @Moses249
+> **phase:** implement · Design + tasks approved 2026-11-28 · owner @Moses249
 
 # Feature: execution-completion-contract
 
@@ -179,7 +179,7 @@ The design checkpoint approves this proposal. The live checklist is added to iss
 | T7 | API/CLI and legacy compatibility | AC-1, AC-6, AC-8, AC-10, AC-11 |
 | T8 | UI contracts, system/business state, gates, resume/accessibility | AC-6, AC-8, AC-12 |
 | T9 | Failure/time/restart/concurrency/compatibility tests and docs | AC-1–AC-12 |
-| T10 | Fresh read-only QA, defect regression, Draft PR evidence | AC-1–AC-12 |
+| T10 | Independent QA preparation and Draft PR evidence (verification runs in test phase) | AC-1–AC-12 |
 
 ### Risks and alternatives
 
